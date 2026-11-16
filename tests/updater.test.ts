@@ -3,7 +3,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
-import { checkForUpdates, findGitExecutable } from "../src/updater.ts";
+import { checkForUpdates, findGitExecutable, getCurrentCommit } from "../src/updater.ts";
 
 describe("GitHub auto-updater", () => {
   const tempDirs: string[] = [];
@@ -14,9 +14,11 @@ describe("GitHub auto-updater", () => {
     }
   });
 
-  it("discovers a git executable path", () => {
+  it("discovers a git executable path and reads current commit", async () => {
     const gitBin = findGitExecutable();
     assert.ok(typeof gitBin === "string" && gitBin.length > 0);
+    const commit = await getCurrentCommit(process.cwd());
+    assert.ok(typeof commit === "string" && commit.length >= 7);
   });
 
   it("reports unsupported cleanly when directory is not a git repo", async () => {

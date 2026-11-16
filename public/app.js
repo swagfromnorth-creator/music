@@ -1320,20 +1320,54 @@ async function refreshUpdateStatus(notifyToast = false) {
       el.applyUpdateBtn.classList.add("hidden");
       return;
     }
+    const modeLabel = status.autoUpdateEnabled ? "Auto-update ON (20s)" : "Manual mode";
     if (status.behindCount > 0) {
-      el.updateStatusText.textContent = `Update available: ${status.behindCount} new commit(s) (${status.localCommit} → ${status.remoteCommit})`;
+      el.updateStatusText.textContent = `${modeLabel} · Pulling ${status.behindCount} new commit(s) (${status.localCommit} → ${status.remoteCommit})`;
       el.applyUpdateBtn.classList.remove("hidden");
       if (notifyToast) {
-        showToast(`GitHub update available (${status.behindCount} new commit${status.behindCount > 1 ? "s" : ""}) — open Settings & cache to pull.`, "info");
+        showToast(`GitHub update detected (${status.behindCount} new commit${status.behindCount > 1 ? "s" : ""}) — auto-updating...`, "info");
       }
     } else {
-      el.updateStatusText.textContent = `Up to date (${status.localCommit || "main"})`;
+      el.updateStatusText.textContent = `${modeLabel} · Up to date (${status.localCommit || "main"})`;
       el.applyUpdateBtn.classList.add("hidden");
     }
   } catch {
     el.updateStatusText.textContent = "Could not reach GitHub";
   }
 }
+
+let bootCommit = null;
+let pendingFrontendReload = false;
+
+async function pollServerVersion() {
+  try {
+    const health = await apiJson("/api/health");
+    if (!health.commit) return;
+    if (!bootCommit) {
+      bootCommit = health.commit;
+      return;
+    }
+    if (health.commit !== bootCommit) {
+      pendingFrontendReload = true;
+      if (el.audioEl.paused || !el.audioEl.src) {
+        showToast(`Updated from GitHub (${health.commit}) — refreshing...`, "success");
+        setTimeout(() => location.reload(), 900);
+      } else {
+        showToast(`Updated from GitHub (${health.commit}) — will reload when playback pauses.`, "info");
+      }
+    }
+  } catch {
+    // ignore transient restart window while server swaps processes
+  }
+}
+
+el.audioEl.addEventListener("pause", () => {
+  if (pendingFrontendReload) {
+    setTimeout(() => {
+      if (el.audioEl.paused) location.reload();
+    }, 600);
+  }
+});
 
 el.checkUpdateBtn.addEventListener("click", () => refreshUpdateStatus(false));
 
@@ -1344,8 +1378,10 @@ el.applyUpdateBtn.addEventListener("click", async () => {
     const res = await apiJson("/api/update/apply", { method: "POST", body: "{}" });
     el.applyUpdateBtn.classList.add("hidden");
     if (res.updated) {
-      el.updateStatusText.textContent = `Updated ${res.previousCommit} → ${res.currentCommit}. Restart server (or run start.bat) to load backend updates.`;
-      el.restartAppBtn.classList.remove("hidden");
+      el.updateStatusText.textContent = `Updated ${res.previousCommit} → ${res.currentCommit}.`;
+      if (res.needsServerRestart) {
+        el.restartAppBtn.classList.remove("hidden");
+      }
       showToast(`Pulled latest from GitHub (${res.previousCommit} → ${res.currentCommit}).`, "success");
     } else {
       el.updateStatusText.textContent = `Already up to date (${res.currentCommit}).`;
@@ -1371,7 +1407,7 @@ el.restartAppBtn.addEventListener("click", async () => {
 // Bootstrap
 (async function init() {
   el.audioEl.volume = Number(el.volumeSlider.value);
-  await Promise.all([refreshTrackers(), refreshCacheStats()]);
+  await Promise.all([refreshTrackers(), refreshCacheStats(), pollServerVersion()]);
   await loadHomeData();
-  void refreshUpdateStatus(true);
+  setInterval(() => void pollServerVersion(), 12000);
 })();

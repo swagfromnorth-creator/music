@@ -13,12 +13,17 @@ export interface UpdateStatus {
   behindCount: number;
   commits: string[];
   dirty: boolean;
+  autoUpdateEnabled?: boolean;
+  lastCheckedAt?: number;
+  lastError?: string | null;
 }
 
 export interface UpdateApplyResult {
   updated: boolean;
   previousCommit: string;
   currentCommit: string;
+  changedFiles: string[];
+  needsServerRestart: boolean;
   summary: string;
   installedDeps: boolean;
 }
@@ -45,6 +50,9 @@ export function findGitExecutable(): string | null {
     }
     candidates.push("C:\\Program Files\\Git\\cmd\\git.exe");
     candidates.push("C:\\Program Files (x86)\\Git\\cmd\\git.exe");
+    candidates.push(
+      "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\TeamFoundation\\Team Explorer\\Git\\cmd\\git.exe"
+    );
   }
 
   for (const c of candidates) {
@@ -62,6 +70,15 @@ async function runGit(cwd: string, args: string[]): Promise<string> {
     timeout: 20000,
   });
   return stdout.trim();
+}
+
+export async function getCurrentCommit(cwd = process.cwd()): Promise<string | null> {
+  if (!fs.existsSync(path.join(cwd, ".git"))) return null;
+  try {
+    return await runGit(cwd, ["rev-parse", "--short", "HEAD"]);
+  } catch {
+    return null;
+  }
 }
 
 export async function checkForUpdates(cwd = process.cwd()): Promise<UpdateStatus> {
@@ -103,29 +120,55 @@ export async function applyGitUpdate(cwd = process.cwd()): Promise<UpdateApplyRe
     throw new Error("Workspace is not a Git repository.");
   }
 
+  const branch = await runGit(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (branch.toLowerCase() !== "main") {
+    throw new Error(`Auto-update only runs on 'main' branch (current: '${branch}').`);
+  }
+
   const previousCommit = await runGit(cwd, ["rev-parse", "--short", "HEAD"]);
-  const pullOut = await runGit(cwd, ["pull", "--ff-only", "origin", "main"]);
+  let pullOut = "";
+
+  try {
+    pullOut = await runGit(cwd, ["pull", "--rebase", "--autostash", "origin", "main"]);
+  } catch (err) {
+    // Abort incomplete rebase if a conflict occurred so repo stays usable
+    try {
+      await runGit(cwd, ["rebase", "--abort"]);
+    } catch {
+      // ignore if not in rebase
+    }
+    throw err;
+  }
+
   const currentCommit = await runGit(cwd, ["rev-parse", "--short", "HEAD"]);
   const updated = previousCommit !== currentCommit;
 
+  let changedFiles: string[] = [];
   let installedDeps = false;
   if (updated) {
     try {
-      const changedFiles = await runGit(cwd, ["diff", "--name-only", previousCommit, currentCommit]);
-      if (/\bpackage(?:-lock)?\.json\b/i.test(changedFiles)) {
+      const diffOut = await runGit(cwd, ["diff", "--name-only", previousCommit, currentCommit]);
+      changedFiles = diffOut.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      if (changedFiles.some((f) => /^package(?:-lock)?\.json$/i.test(f))) {
         const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
         await execFileAsync(npmCmd, ["install"], { cwd, timeout: 60000 });
         installedDeps = true;
       }
     } catch {
-      // non-fatal if npm install wasn't required
+      // non-fatal if diff/install skipped
     }
   }
+
+  const needsServerRestart =
+    updated &&
+    changedFiles.some((f) => f.startsWith("src/") || /^package(?:-lock)?\.json$/i.test(f));
 
   return {
     updated,
     previousCommit,
     currentCommit,
+    changedFiles,
+    needsServerRestart,
     summary: pullOut,
     installedDeps,
   };
