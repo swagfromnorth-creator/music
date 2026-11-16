@@ -6,7 +6,7 @@ import { afterEach, describe, it } from "node:test";
 import { AppDatabase } from "../src/db.ts";
 import { generateDemoWavBuffer } from "../src/demo.ts";
 import { LOCAL_LIBRARY_TRACKER_ID, scanLocalMusicFolder } from "../src/local-library.ts";
-import { findFfmpegExecutable, remuxStreamToFile } from "../src/media-tools.ts";
+import { findFfmpegExecutable, isCollectionUrl, remuxStreamToFile } from "../src/media-tools.ts";
 import { cleanMessyTrackTitle, lookupMusicBrainzMetadata, parseSpotifyPlaylistInput } from "../src/musicbrainz.ts";
 import { detectHost, resolveHostUrl } from "../src/resolver.ts";
 import { createAppServer, type AppContext } from "../src/server.ts";
@@ -437,6 +437,24 @@ describe("media extraction, local scanner, MusicBrainz normalization & Spotify m
     // Also test explicit addTrackToPlaylist duplicate rejection for Unforgettable ft. Swae Lee vs Unforgettable
     assert.equal(db.addTrackToPlaylist(pl.id, anotherSameVersion.id), false);
     assert.equal(db.addTrackToPlaylist(pl.id, active[0]!.id), false);
+
+    // Unavailable playlist/library song stays present with isUnavailable=true until recovered
+    db.setTrackUnavailable(tSky1.id, true);
+    const plWithUnavail = db.getPlaylistDetail(pl.id)!;
+    const unavailEntry = plWithUnavail.tracks.find((x) => x.id === tSky1.id);
+    assert.equal(unavailEntry?.isUnavailable, true);
+    db.setTrackUnavailable(tSky1.id, false);
+    assert.equal(db.getTrackById(tSky1.id)?.isUnavailable, false);
+
+    // Browser cookies setting persistence
+    assert.equal(db.setCookiesBrowser("chrome"), "chrome");
+    assert.equal(db.getCookiesBrowser(), "chrome");
+
+    // Collection URL detection for YouTube Music albums, YouTube playlists, and SoundCloud sets
+    assert.equal(isCollectionUrl("https://music.youtube.com/browse/MPREb_or9GipYFiAw"), true);
+    assert.equal(isCollectionUrl("https://www.youtube.com/playlist?list=PL12345"), true);
+    assert.equal(isCollectionUrl("https://soundcloud.com/artist/sets/album-name"), true);
+    assert.equal(isCollectionUrl("https://www.youtube.com/watch?v=48ydDUQ16RE"), false);
     } finally {
       db.close();
     }

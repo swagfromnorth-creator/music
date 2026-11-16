@@ -3289,3 +3289,34 @@ body {
   gap: 8px;
   flex-shrink: 0;
 }
+
+.track-item.is-unavailable {
+  opacity: 0.45;
+  transition: opacity 0.16s ease;
+}
+
+.track-item.is-unavailable:hover {
+  opacity: 0.78;
+}
+
+.track-item.is-unavailable .track-thumb img {
+  filter: grayscale(0.75);
+}
+
+.soft-tag.unavailable-tag {
+  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.3);
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.stream-pill.preparing {
+  color: #e9d5ff;
+  border-color: rgba(168, 85, 247, 0.4);
+  background: rgba(124, 77, 255, 0.2);
+  animation: vs-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes vs-pulse {
+  0%, 100% { opacity: 0.65; }
+  50% { opacity: 1; }
+}

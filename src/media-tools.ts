@@ -36,6 +36,29 @@ export interface OnlineSearchResult {
   thumbnail: string | null;
 }
 
+export interface OnlineCollectionResult {
+  id: string;
+  kind: "album" | "playlist";
+  source: "ytmusic" | "youtube" | "soundcloud";
+  browseId: string;
+  url: string;
+  title: string;
+  artist: string;
+  subtitle: string | null;
+  thumbnail: string | null;
+}
+
+let runtimeCookiesBrowser: string | null = null;
+
+export function setRuntimeCookiesBrowser(browser: string | null): void {
+  const clean = (browser ?? "").trim().toLowerCase();
+  runtimeCookiesBrowser = clean || null;
+}
+
+export function getEffectiveCookiesBrowser(): string | null {
+  return runtimeCookiesBrowser ?? ((process.env.YTDLP_COOKIES_BROWSER ?? "").trim().toLowerCase() || null);
+}
+
 function findExecutableInWinGet(packagePrefix: string, relativeExeCandidates: string[]): string | null {
   if (process.platform !== "win32") return null;
   const localApp = process.env.LOCALAPPDATA ?? "";
@@ -137,7 +160,7 @@ export async function resolveWithYtDlp(targetUrl: string, timeoutMs = 15000): Pr
     "-f",
     "bestaudio[ext=mp3]/bestaudio[ext=webm]/bestaudio[protocol*=m3u8]/bestaudio/18",
   ];
-  const cookieBrowser = (process.env.YTDLP_COOKIES_BROWSER ?? "").trim();
+  const cookieBrowser = getEffectiveCookiesBrowser();
   if (cookieBrowser) {
     args.push("--cookies-from-browser", cookieBrowser);
   }
@@ -215,6 +238,252 @@ export function formatDurationSeconds(sec: number | null | undefined): string | 
   return `${mins}:${String(rem).padStart(2, "0")}`;
 }
 
+export function isCollectionUrl(rawUrl: string): boolean {
+  const u = rawUrl.toLowerCase();
+  return (
+    /(?:youtube\.com|music\.youtube\.com)\/(?:playlist\?list=|browse\/MPREb_)/i.test(u) ||
+    /soundcloud\.com\/[^/]+\/sets\/[^/?#]+/i.test(u)
+  );
+}
+
+function upgradeThumbUrl(rawThumb: string | null | undefined): string | null {
+  if (!rawThumb) return null;
+  return rawThumb.replace(/=w\d+-h\d+[^&]*/i, "=w544-h544-l90-rj");
+}
+
+export async function searchYouTubeMusicCollections(
+  query: string,
+  limit = 8
+): Promise<OnlineCollectionResult[]> {
+  const clean = query.trim();
+  if (!clean) return [];
+
+  const yt = await getInnertube();
+  const [albumsRes, playlistsRes] = await Promise.all([
+    yt.music.search(clean, { type: "album" }).catch(() => null),
+    yt.music.search(clean, { type: "playlist" }).catch(() => null),
+  ]);
+
+  const rawAlbums = ((albumsRes as { albums?: { contents?: unknown[] } })?.albums?.contents ?? []) as Array<{
+    id?: string;
+    title?: string;
+    author?: { name?: string };
+    year?: string;
+    thumbnails?: Array<{ url?: string }>;
+  }>;
+
+  const rawPlaylists = (
+    (playlistsRes as { playlists?: { contents?: unknown[] } })?.playlists?.contents ?? []
+  ) as Array<{
+    id?: string;
+    title?: string;
+    author?: { name?: string };
+    thumbnails?: Array<{ url?: string }>;
+  }>;
+
+  const out: OnlineCollectionResult[] = [];
+  const half = Math.max(2, Math.ceil(limit / 2));
+
+  for (const a of rawAlbums.slice(0, half)) {
+    if (!a.id || !a.title) continue;
+    const artist = a.author?.name || "Artist";
+    out.push({
+      id: a.id,
+      kind: "album",
+      source: "ytmusic",
+      browseId: a.id,
+      url: `https://music.youtube.com/browse/${a.id}`,
+      title: a.title,
+      artist,
+      subtitle: a.year ? `Album · ${a.year}` : "Album",
+      thumbnail: upgradeThumbUrl(a.thumbnails?.[0]?.url),
+    });
+  }
+
+  for (const p of rawPlaylists.slice(0, limit - out.length)) {
+    if (!p.id || !p.title) continue;
+    const listId = p.id.startsWith("VL") ? p.id.slice(2) : p.id;
+    out.push({
+      id: p.id,
+      kind: "playlist",
+      source: "ytmusic",
+      browseId: p.id,
+      url: `https://music.youtube.com/playlist?list=${listId}`,
+      title: p.title,
+      artist: p.author?.name || "YouTube Music",
+      subtitle: "YouTube Music Playlist",
+      thumbnail: upgradeThumbUrl(p.thumbnails?.[0]?.url),
+    });
+  }
+
+  return out;
+}
+
+export async function fetchOnlineCollectionTracks(params: {
+  kind?: "album" | "playlist";
+  source?: "ytmusic" | "youtube" | "soundcloud";
+  idOrUrl: string;
+}): Promise<{
+  title: string;
+  artist: string;
+  thumbnail: string | null;
+  tracks: OnlineSearchResult[];
+}> {
+  const input = params.idOrUrl.trim();
+  const albumBrowseMatch = input.match(/(MPREb_[a-zA-Z0-9_-]+)/);
+  const ytListMatch = input.match(/[?&]list=([a-zA-Z0-9_-]+)/) ?? input.match(/^(VL[a-zA-Z0-9_-]+|OLAK[a-zA-Z0-9_-]+|PL[a-zA-Z0-9_-]+|RDCLAK[a-zA-Z0-9_-]+)$/);
+
+  // 1) Try YouTube Music Album via Innertube
+  if (params.kind === "album" || albumBrowseMatch) {
+    const browseId = albumBrowseMatch?.[1] ?? input;
+    const yt = await getInnertube();
+    const alb = await yt.music.getAlbum(browseId);
+    const header = (alb as { header?: { title?: { text?: string }; subtitle?: { text?: string }; thumbnail?: { contents?: Array<{ url?: string }> } } }).header;
+    const title = header?.title?.text || "Album";
+    const cover = upgradeThumbUrl(header?.thumbnail?.contents?.[0]?.url);
+    const rawItems = ((alb as { contents?: unknown[] }).contents ?? []) as Array<{
+      id?: string;
+      title?: string;
+      artists?: Array<{ name?: string }>;
+      duration?: { text?: string; seconds?: number };
+      flex_columns?: Array<{ title?: { text?: string } }>;
+    }>;
+
+    const artistHint =
+      rawItems[0]?.artists?.map((a) => a.name).filter(Boolean).join(", ") ||
+      header?.subtitle?.text?.replace(/Album\s*•\s*/i, "").trim() ||
+      "Artist";
+
+    const tracks: OnlineSearchResult[] = [];
+    for (const item of rawItems.slice(0, 50)) {
+      if (!item.id) continue;
+      const trackTitle = item.title || item.flex_columns?.[0]?.title?.text || "Untitled";
+      const trackArtist = item.artists?.map((a) => a.name).filter(Boolean).join(", ") || artistHint;
+      tracks.push({
+        id: item.id,
+        source: "ytmusic",
+        url: `https://www.youtube.com/watch?v=${item.id}`,
+        title: trackTitle,
+        artist: trackArtist,
+        album: title,
+        durationSec: item.duration?.seconds ?? null,
+        durationText: item.duration?.text ?? formatDurationSeconds(item.duration?.seconds),
+        thumbnail: cover,
+      });
+    }
+    return { title, artist: artistHint, thumbnail: cover, tracks };
+  }
+
+  // 2) Try YouTube Music Playlist via Innertube
+  if ((params.source === "ytmusic" || ytListMatch) && !/soundcloud\.com/i.test(input)) {
+    const rawListId = ytListMatch?.[1] ?? input;
+    const browseOrListId = rawListId.startsWith("VL") ? rawListId : rawListId;
+    try {
+      const yt = await getInnertube();
+      const pl = await yt.music.getPlaylist(browseOrListId);
+      const header = (pl as { header?: { title?: { text?: string }; author?: { name?: string }; thumbnail?: { contents?: Array<{ url?: string }> } } }).header;
+      const title = header?.title?.text || "Playlist";
+      const cover = upgradeThumbUrl(header?.thumbnail?.contents?.[0]?.url);
+      const rawItems = (
+        (pl as { items?: unknown[]; contents?: unknown[] }).items ??
+        (pl as { contents?: unknown[] }).contents ??
+        []
+      ) as Array<{
+        id?: string;
+        title?: string;
+        artists?: Array<{ name?: string }>;
+        duration?: { text?: string; seconds?: number };
+        thumbnails?: Array<{ url?: string }>;
+      }>;
+
+      const tracks: OnlineSearchResult[] = [];
+      for (const item of rawItems.slice(0, 50)) {
+        if (!item.id || !item.title) continue;
+        tracks.push({
+          id: item.id,
+          source: "ytmusic",
+          url: `https://www.youtube.com/watch?v=${item.id}`,
+          title: item.title,
+          artist: item.artists?.map((a) => a.name).filter(Boolean).join(", ") || "Various Artists",
+          album: title,
+          durationSec: item.duration?.seconds ?? null,
+          durationText: item.duration?.text ?? formatDurationSeconds(item.duration?.seconds),
+          thumbnail: upgradeThumbUrl(item.thumbnails?.[0]?.url) || cover,
+        });
+      }
+      if (tracks.length > 0) {
+        return { title, artist: header?.author?.name || "YouTube Music", thumbnail: cover, tracks };
+      }
+    } catch {
+      // Fall through cleanly to yt-dlp --flat-playlist
+    }
+  }
+
+  // 3) Generic YouTube or SoundCloud playlist URL via yt-dlp --flat-playlist
+  const ytdlp = findYtDlpExecutable();
+  if (!ytdlp) {
+    throw new Error("yt-dlp executable was not found to load playlist.");
+  }
+  const targetUrl =
+    /^https?:\/\//i.test(input)
+      ? input
+      : `https://www.youtube.com/playlist?list=${input.replace(/^VL/, "")}`;
+
+  const args = ["--force-ipv4", "--flat-playlist", "--dump-json", "--no-warnings", "--playlist-end", "50"];
+  const cookieBrowser = getEffectiveCookiesBrowser();
+  if (cookieBrowser) args.push("--cookies-from-browser", cookieBrowser);
+  args.push("--", targetUrl);
+
+  const { stdout } = await execFileAsync(ytdlp, args, {
+    env: buildToolEnv(),
+    timeout: 20000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+
+  const tracks: OnlineSearchResult[] = [];
+  let playlistTitle = "Imported Playlist";
+  let playlistCover: string | null = null;
+
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim().startsWith("{")) continue;
+    try {
+      const item = JSON.parse(line) as {
+        id?: string;
+        url?: string;
+        webpage_url?: string;
+        title?: string;
+        uploader?: string;
+        artist?: string;
+        playlist_title?: string;
+        duration?: number;
+        thumbnail?: string;
+        thumbnails?: Array<{ url?: string }>;
+      };
+      if (item.playlist_title) playlistTitle = item.playlist_title;
+      const thumb = upgradeThumbUrl(item.thumbnail || item.thumbnails?.[item.thumbnails.length - 1]?.url);
+      if (!playlistCover && thumb) playlistCover = thumb;
+      const url = item.webpage_url || item.url;
+      if (!url || !item.title) continue;
+      const src: "soundcloud" | "youtube" = /soundcloud\.com/i.test(url) ? "soundcloud" : "youtube";
+      tracks.push({
+        id: item.id || url,
+        source: src,
+        url,
+        title: item.title,
+        artist: item.artist || item.uploader || (src === "soundcloud" ? "SoundCloud" : "YouTube"),
+        album: playlistTitle,
+        durationSec: typeof item.duration === "number" ? item.duration : null,
+        durationText: formatDurationSeconds(item.duration),
+        thumbnail: thumb,
+      });
+    } catch {
+      // skip malformed item
+    }
+  }
+
+  return { title: playlistTitle, artist: "Imported Collection", thumbnail: playlistCover, tracks };
+}
+
 export async function searchYouTubeMusic(query: string, limit = 12): Promise<OnlineSearchResult[]> {
   const yt = await getInnertube();
   const res = await yt.music.search(query, { type: "song" });
@@ -266,7 +535,7 @@ export async function searchWithYtDlp(
 
   const { stdout } = await execFileAsync(
     ytdlp,
-    ["--flat-playlist", "--dump-json", "--no-warnings", "--", target],
+    ["--force-ipv4", "--flat-playlist", "--dump-json", "--no-warnings", "--", target],
     {
       env: buildToolEnv(),
       timeout: 15000,

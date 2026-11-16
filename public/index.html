@@ -285,6 +285,13 @@
 
                 <div id="searchTopResultWrap" class="top-result-wrap hidden"></div>
 
+                <div id="searchCollectionsWrap" class="content-block hidden" style="margin-bottom: 18px">
+                  <div class="section-row">
+                    <h3>Playlists &amp; Albums</h3>
+                  </div>
+                  <div id="searchCollectionsGrid" class="card-shelf"></div>
+                </div>
+
                 <div id="searchTrackList" class="clean-list"></div>
 
                 <div id="listEmptyState" class="empty-inline hidden">
@@ -400,7 +407,8 @@
             <section id="libraryView" class="view-section hidden">
               <div class="section-row">
                 <h1 class="page-display-title">My library</h1>
-                <div style="display:flex; gap:8px">
+                <div style="display:flex; gap:8px; flex-wrap:wrap">
+                  <button type="button" id="libMbBatchBtn" class="pill-btn" title="Auto-tag imported &amp; local tracks missing artwork">Auto-Tag Missing Art</button>
                   <button type="button" id="libNewPlaylistBtn" class="pill-btn">+ New playlist</button>
                   <button type="button" id="libSyncBtn" class="btn btn-accent btn-sm">+ Add tracker</button>
                 </div>
@@ -1008,6 +1016,20 @@
           </div>
 
           <div id="cacheEntriesList" class="clean-list cache-entries-list"></div>
+
+          <div class="resolver-details" style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap">
+            <div>
+              <strong style="color:var(--text)">Browser Cookies (SoundCloud Go+ / YouTube)</strong>
+              <div class="small muted">Optionally read signed-in browser cookies when extracting streams.</div>
+            </div>
+            <select id="cookiesBrowserSelect" class="compact-select" aria-label="Browser cookies source">
+              <option value="">None</option>
+              <option value="chrome">Chrome</option>
+              <option value="edge">Microsoft Edge</option>
+              <option value="brave">Brave</option>
+              <option value="firefox">Firefox</option>
+            </select>
+          </div>
 
           <div class="resolver-details" style="display:flex; flex-direction:column; gap:8px">
             <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap">

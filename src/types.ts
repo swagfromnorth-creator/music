@@ -65,6 +65,7 @@ export interface TrackRecord {
   resolvedFilename: string | null;
   resolvedAt: number | null;
   isPlayable: boolean;
+  isUnavailable?: boolean;
   audioMeta: AudioHeaderInfo | null;
   cacheStatus?: {
     cacheKey: string;

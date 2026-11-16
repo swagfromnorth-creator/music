@@ -113,7 +113,9 @@ const state = {
   searchQuery: "",
   searchSource: "library", // "library" | "ytmusic" | "youtube" | "soundcloud"
   onlineResults: [],
+  onlineCollections: [],
   onlineSearchReqSeq: 0,
+  preparingTrackId: null,
   searchTrackerId: "",
   searchTabName: "",
   searchEra: "",
@@ -239,6 +241,8 @@ const el = {
   playableFilterBtn: $("playableFilterBtn"),
   clearFiltersBtn: $("clearFiltersBtn"),
   searchTopResultWrap: $("searchTopResultWrap"),
+  searchCollectionsWrap: $("searchCollectionsWrap"),
+  searchCollectionsGrid: $("searchCollectionsGrid"),
   searchTrackList: $("searchTrackList"),
   listEmptyState: $("listEmptyState"),
   paginationBar: $("paginationBar"),
@@ -273,6 +277,7 @@ const el = {
 
   libraryView: $("libraryView"),
   libNewPlaylistBtn: $("libNewPlaylistBtn"),
+  libMbBatchBtn: $("libMbBatchBtn"),
   libSyncBtn: $("libSyncBtn"),
   libraryTabs: $("libraryTabs"),
   libraryTabBody: $("libraryTabBody"),
@@ -432,6 +437,7 @@ const el = {
   customCapMbInput: $("customCapMbInput"),
   clearAllCacheBtn: $("clearAllCacheBtn"),
   cacheEntriesList: $("cacheEntriesList"),
+  cookiesBrowserSelect: $("cookiesBrowserSelect"),
   updateStatusText: $("updateStatusText"),
   checkUpdateBtn: $("checkUpdateBtn"),
   applyUpdateBtn: $("applyUpdateBtn"),
@@ -776,16 +782,32 @@ async function refreshAllCore() {
 }
 
 /* ==================== SHARED COMPONENT BUILDERS ==================== */
+function isTrackUnavailable(tr) {
+  return Boolean(
+    tr?.isUnavailable ||
+      tr?.tabName === "Unavailable" ||
+      /\b(?:not\s+available|unavailable|inaudible|snippet)\b/i.test(tr?.quality || "")
+  );
+}
+
+function canAttemptPlay(tr) {
+  return Boolean(tr && (tr.isPlayable || (Array.isArray(tr.links) && tr.links.length > 0)));
+}
+
 function buildTrackRowHtml(tr, opts = {}) {
   const isPlayingTrack = state.playingTrack?.id === tr.id;
   const isActivelyPlaying = isPlayingTrack && !el.audioEl.paused;
   const isSelected = state.selectedTrack?.id === tr.id;
   const isLiked = state.likedIds.has(tr.id);
+  const unavail = isTrackUnavailable(tr);
+  const clickable = canAttemptPlay(tr);
   const lossless = isTrackLossless(tr);
   const codec = formatCodecShort(tr);
 
   let badgeHtml = "";
-  if (tr.cacheStatus?.isComplete) {
+  if (unavail) {
+    badgeHtml = `<span class="soft-tag unavailable-tag">Unavailable</span>`;
+  } else if (tr.cacheStatus?.isComplete) {
     badgeHtml = `<span class="soft-tag lossless">Offline</span>`;
   } else if (tr.cacheStatus?.totalBytes) {
     const pct = Math.round((tr.cacheStatus.cachedBytes / tr.cacheStatus.totalBytes) * 100);
@@ -811,7 +833,7 @@ function buildTrackRowHtml(tr, opts = {}) {
 
   return `
     <div
-      class="track-item ${isPlayingTrack ? "playing" : ""} ${isSelected ? "active" : ""}"
+      class="track-item ${isPlayingTrack ? "playing" : ""} ${isSelected ? "active" : ""} ${unavail ? "is-unavailable" : ""}"
       data-track-id="${escapeHtml(tr.id)}"
       data-list-ctx="${escapeHtml(opts.ctx || "")}"
     >
@@ -820,8 +842,8 @@ function buildTrackRowHtml(tr, opts = {}) {
         class="track-thumb"
         data-action="play"
         data-track-id="${escapeHtml(tr.id)}"
-        ${tr.isPlayable ? "" : "disabled"}
-        title="${tr.isPlayable ? (isActivelyPlaying ? "Pause" : "Play") : "No playable link"}"
+        ${clickable ? "" : "disabled"}
+        title="${unavail ? "Unavailable (click to retry)" : clickable ? (isActivelyPlaying ? "Pause" : "Play") : "No playable link"}"
       >
         <span class="track-thumb-fallback">${escapeHtml(monogram(tr.title))}</span>
         ${imgSrc ? `<img src="${escapeHtml(imgSrc)}" alt="" loading="lazy" onerror="this.remove()" />` : ""}
@@ -1061,6 +1083,7 @@ async function renderSearchView() {
 
   if (!hasQueryOrFilters) {
     el.queryTimingBadge.classList.add("hidden");
+    el.searchCollectionsWrap?.classList.add("hidden");
     if (state.homeEras.length === 0 && state.trackers.length > 0) {
       const meta = await apiJson("/api/tracks?limit=1").catch(() => null);
       if (meta?.eras) state.homeEras = meta.eras;
@@ -1078,8 +1101,9 @@ async function loadOnlineSearchResults() {
 
   if (!q) {
     el.queryTimingBadge.classList.add("hidden");
+    el.searchCollectionsWrap?.classList.add("hidden");
     el.searchResultsHeading.textContent = `Search ${label}`;
-    el.searchResultsSub.textContent = "Type a song title, artist, or link query in the search bar above.";
+    el.searchResultsSub.textContent = "Type a song, album, or playlist name in the search bar above.";
     el.searchTrackList.innerHTML = "";
     el.listEmptyState.classList.add("hidden");
     return;
@@ -1097,10 +1121,41 @@ async function loadOnlineSearchResults() {
     if (seq !== state.onlineSearchReqSeq || state.searchSource === "library") return;
 
     const results = data.results || [];
+    const collections = data.collections || [];
     state.onlineResults = results;
-    el.queryTimingBadge.textContent = `${results.length} · ${label}`;
+    state.onlineCollections = collections;
+
+    el.queryTimingBadge.textContent = `${results.length + collections.length} · ${label}`;
     el.queryTimingBadge.classList.remove("hidden");
-    el.searchResultsSub.textContent = `${results.length} playable results on ${label} (click Play to stream & save to library)`;
+    el.searchResultsSub.textContent =
+      collections.length > 0
+        ? `${collections.length} album/playlist matches · ${results.length} songs on ${label}`
+        : `${results.length} playable songs on ${label} (double-click or click Play to stream)`;
+
+    if (collections.length > 0 && el.searchCollectionsWrap && el.searchCollectionsGrid) {
+      el.searchCollectionsWrap.classList.remove("hidden");
+      el.searchCollectionsGrid.innerHTML = collections
+        .map((c, idx) => {
+          const thumb = c.thumbnail ? coverUrl(c.thumbnail) : "";
+          return `
+            <div class="media-card online-col-card" data-online-col-play="${idx}">
+              <div class="media-card-art" style="background:${MIX_GRADIENTS[idx % MIX_GRADIENTS.length]}">
+                <span>${escapeHtml(monogram(c.title))}</span>
+                ${thumb ? `<img src="${escapeHtml(thumb)}" alt="" loading="lazy" onerror="this.remove()" />` : ""}
+                <button type="button" class="media-card-play" data-online-col-play="${idx}" title="Play ${escapeHtml(c.title)}">${ICONS.play}</button>
+              </div>
+              <div class="media-card-title">${escapeHtml(c.title)}</div>
+              <div class="media-card-sub" style="display:flex; align-items:center; justify-content:space-between; gap:6px">
+                <span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${escapeHtml(c.subtitle || c.kind)} · ${escapeHtml(c.artist)}</span>
+                <button type="button" class="pill-btn" style="padding:2px 8px; font-size:11px; flex-shrink:0" data-online-col-save="${idx}">+ Playlist</button>
+              </div>
+            </div>
+          `;
+        })
+        .join("");
+    } else {
+      el.searchCollectionsWrap?.classList.add("hidden");
+    }
 
     el.searchTrackList.innerHTML = results
       .map((item, idx) => {
@@ -1124,12 +1179,46 @@ async function loadOnlineSearchResults() {
         `;
       })
       .join("");
-    el.listEmptyState.classList.toggle("hidden", results.length > 0);
+    el.listEmptyState.classList.toggle("hidden", results.length > 0 || collections.length > 0);
   } catch (err) {
     if (seq !== state.onlineSearchReqSeq) return;
+    el.searchCollectionsWrap?.classList.add("hidden");
     el.searchResultsSub.textContent = `Search failed: ${err.message}`;
     el.searchTrackList.innerHTML = "";
     el.listEmptyState.classList.remove("hidden");
+  }
+}
+
+async function importOnlineCollection(idx, autoPlay) {
+  const col = state.onlineCollections[idx];
+  if (!col) return;
+  showToast(`${autoPlay ? "Loading" : "Saving"} ${col.kind} "${col.title}"...`);
+  try {
+    const res = await apiJson("/api/discover/import-collection", {
+      method: "POST",
+      body: JSON.stringify({
+        kind: col.kind,
+        source: col.source,
+        idOrUrl: col.browseId || col.url,
+        title: col.title,
+        artist: col.artist,
+        thumbnail: col.thumbnail,
+        savePlaylist: true,
+      }),
+    });
+    rememberTracks(res.tracks || []);
+    await Promise.all([refreshPlaylists(), refreshTrackers(), refreshActivity()]);
+    if (!autoPlay && res.playlist?.id) {
+      showToast(`Saved "${res.playlist.name}" (${res.tracks?.length ?? 0} tracks) to Playlists.`, "success");
+      await navigate({ view: "playlist", playlistId: res.playlist.id });
+    } else if (res.tracks?.length) {
+      showToast(`Playing "${res.title}" (${res.tracks.length} tracks)`, "success");
+      startQueueAndPlay(res.tracks, 0, res.title, false);
+    } else {
+      showToast("No playable tracks found in this collection.", "error");
+    }
+  } catch (err) {
+    showToast(err.message, "error");
   }
 }
 
@@ -1356,10 +1445,49 @@ async function loadSearchResults() {
     el.searchTopResultWrap.classList.add("hidden");
   }
 
+  // Library search: also surface matching Playlists & Eras/Albums
+  const libColCards = [];
+  if (qLower && el.searchCollectionsWrap && el.searchCollectionsGrid) {
+    for (const pl of state.playlists) {
+      if (pl.name.toLowerCase().includes(qLower) || (pl.description || "").toLowerCase().includes(qLower)) {
+        libColCards.push(`
+          <div class="media-card" data-open-playlist="${escapeHtml(pl.id)}">
+            <div class="media-card-art" style="background:${escapeHtml(pl.coverGradient || PLAYLIST_GRADIENTS[0])}">
+              ${buildPlaylistMosaicHtml(pl)}
+              <button type="button" class="media-card-play" data-play-playlist="${escapeHtml(pl.id)}">${ICONS.play}</button>
+            </div>
+            <div class="media-card-title">${escapeHtml(pl.name)}</div>
+            <div class="media-card-sub">Playlist · ${pl.trackCount} tracks</div>
+          </div>
+        `);
+      }
+    }
+    for (const er of state.searchEras) {
+      if (libColCards.length >= 10) break;
+      if (er.era.toLowerCase().includes(qLower)) {
+        const img = er.eraImage ? coverUrl(er.eraImage, "", er.era) : "";
+        libColCards.push(`
+          <div class="media-card" data-open-era="${escapeHtml(er.era)}">
+            <div class="media-card-art" style="background:${er.eraColor ? escapeHtml(er.eraColor) : MIX_GRADIENTS[libColCards.length % MIX_GRADIENTS.length]}">
+              <span>${escapeHtml(monogram(er.era))}</span>
+              ${img ? `<img src="${escapeHtml(img)}" alt="" loading="lazy" onerror="this.remove()" />` : ""}
+            </div>
+            <div class="media-card-title">${escapeHtml(er.era)}</div>
+            <div class="media-card-sub">Era / Album · ${er.count} tracks</div>
+          </div>
+        `);
+      }
+    }
+    el.searchCollectionsWrap.classList.toggle("hidden", libColCards.length === 0);
+    el.searchCollectionsGrid.innerHTML = libColCards.join("");
+  } else {
+    el.searchCollectionsWrap?.classList.add("hidden");
+  }
+
   el.searchTrackList.innerHTML = state.searchTracks
     .map((tr) => buildTrackRowHtml(tr, { ctx: "search" }))
     .join("");
-  el.listEmptyState.classList.toggle("hidden", state.searchTracks.length > 0);
+  el.listEmptyState.classList.toggle("hidden", state.searchTracks.length > 0 || libColCards.length > 0);
 
   const showPages = state.searchTotal > state.searchLimit;
   el.paginationBar.classList.toggle("hidden", !showPages);
@@ -1872,7 +2000,7 @@ function updateTransportButtons() {
 }
 
 function startQueueAndPlay(tracks, startIndex = 0, sourceName = "VaultStream", shuffleNow = false) {
-  const playable = (tracks || []).filter((t) => t?.isPlayable);
+  const playable = (tracks || []).filter((t) => canAttemptPlay(t));
   if (playable.length === 0) {
     showToast("No playable audio tracks in this list.", "error");
     return;
@@ -1889,7 +2017,7 @@ function startQueueAndPlay(tracks, startIndex = 0, sourceName = "VaultStream", s
 }
 
 async function playTrack(track, linkIndex = undefined, replaceContext = true) {
-  if (!track || !track.isPlayable) return;
+  if (!track || !canAttemptPlay(track)) return;
   hideToast();
   initAudioGraphIfNeeded();
 
@@ -1905,6 +2033,7 @@ async function playTrack(track, linkIndex = undefined, replaceContext = true) {
   }
 
   state.playingTrack = track;
+  state.preparingTrackId = track.id;
   el.playerTitle.textContent = track.title;
   el.playerSubtitle.textContent = `${track.artist} · ${track.era}`;
   const artSrc = coverUrl(track.eraImage || "", track.artist, track.era);
@@ -1912,9 +2041,11 @@ async function playTrack(track, linkIndex = undefined, replaceContext = true) {
     `<span>${escapeHtml(monogram(track.title))}</span>` +
     (artSrc ? `<img src="${escapeHtml(artSrc)}" alt="" onerror="this.remove()" />` : "");
 
-  const badge = formatCodecShort(track) || track.primaryHost;
-  el.playerCodecBadge.textContent = badge;
-  el.playerCodecBadge.className = `stream-pill ${isTrackLossless(track) ? "lossless" : ""}`;
+  el.playerCodecBadge.textContent =
+    track.primaryHost === "youtube" || track.primaryHost === "soundcloud"
+      ? "Preparing stream..."
+      : formatCodecShort(track) || track.primaryHost;
+  el.playerCodecBadge.className = "stream-pill preparing";
   el.playerInspectBtn.classList.remove("hidden");
 
   updatePlayerLikeState();
@@ -1938,7 +2069,16 @@ async function playTrack(track, linkIndex = undefined, replaceContext = true) {
 
   try {
     await el.audioEl.play();
+    state.preparingTrackId = null;
+    if (track.isUnavailable) {
+      track.isUnavailable = false;
+      rememberTracks([track]);
+      refreshVisibleTrackRows();
+    }
     setPlayPauseIcons(true);
+    const liveBadge = formatCodecShort(track) || track.primaryHost;
+    el.playerCodecBadge.textContent = liveBadge;
+    el.playerCodecBadge.className = `stream-pill ${isTrackLossless(track) ? "lossless" : ""}`;
     // Record listen in SQLite history
     apiJson("/api/history", {
       method: "POST",
@@ -1977,7 +2117,16 @@ async function playTrack(track, linkIndex = undefined, replaceContext = true) {
       el.audioEl.src = `${streamUrl}${sep}compat=1`;
       try {
         await el.audioEl.play();
+        state.preparingTrackId = null;
+        if (track.isUnavailable) {
+          track.isUnavailable = false;
+          rememberTracks([track]);
+          refreshVisibleTrackRows();
+        }
         setPlayPauseIcons(true);
+        const compatBadge = formatCodecShort(track) || track.primaryHost;
+        el.playerCodecBadge.textContent = compatBadge;
+        el.playerCodecBadge.className = `stream-pill ${isTrackLossless(track) ? "lossless" : ""}`;
         apiJson("/api/history", {
           method: "POST",
           body: JSON.stringify({ trackId: track.id }),
@@ -1990,8 +2139,14 @@ async function playTrack(track, linkIndex = undefined, replaceContext = true) {
       }
     }
 
+    state.preparingTrackId = null;
     el.audioEl.dataset.compatTried = "2";
     setPlayPauseIcons(false);
+    el.playerCodecBadge.textContent = "Unavailable";
+    el.playerCodecBadge.className = "stream-pill";
+    track.isUnavailable = true;
+    rememberTracks([track]);
+    refreshVisibleTrackRows();
     try {
       const probe = await fetch(`/api/tracks/${encodeURIComponent(track.id)}/resolve`, {
         method: "POST",
@@ -2128,10 +2283,13 @@ async function precacheTrack(trackId) {
 }
 
 function refreshVisibleTrackRows() {
-  if (state.route.view === "search" && state.searchTracks.length) {
-    el.searchTrackList.innerHTML = state.searchTracks
-      .map((tr) => buildTrackRowHtml(state.trackMap.get(tr.id) || tr, { ctx: "search" }))
-      .join("");
+  if (state.route.view === "search") {
+    if (state.searchSource !== "library") return;
+    if (state.searchTracks.length) {
+      el.searchTrackList.innerHTML = state.searchTracks
+        .map((tr) => buildTrackRowHtml(state.trackMap.get(tr.id) || tr, { ctx: "search" }))
+        .join("");
+    }
   } else if (state.route.view === "artist") {
     renderArtistLists();
   } else if (["liked", "playlist", "era", "mix"].includes(state.route.view)) {
@@ -2930,7 +3088,7 @@ function handleTrackListInteraction(ev) {
       else el.audioEl.pause();
     } else {
       const list = getListForContext(ctx);
-      const playable = list.filter((t) => t.isPlayable);
+      const playable = list.filter((t) => canAttemptPlay(t));
       const idx = playable.findIndex((t) => t.id === track.id);
       if (idx !== -1) {
         startQueueAndPlay(playable, idx, getSourceNameForContext(ctx), false);
@@ -3093,6 +3251,46 @@ function bindEvents() {
     if (saveOnline) {
       ev.stopPropagation();
       await importOnlineResult(Number(saveOnline.getAttribute("data-online-save")), false);
+    }
+  });
+
+  el.searchCollectionsGrid?.addEventListener("click", async (ev) => {
+    const saveCol = ev.target.closest("[data-online-col-save]");
+    if (saveCol) {
+      ev.stopPropagation();
+      await importOnlineCollection(Number(saveCol.getAttribute("data-online-col-save")), false);
+      return;
+    }
+    const playCol = ev.target.closest("[data-online-col-play]");
+    if (playCol) {
+      ev.stopPropagation();
+      await importOnlineCollection(Number(playCol.getAttribute("data-online-col-play")), true);
+    }
+  });
+
+  el.libMbBatchBtn?.addEventListener("click", async () => {
+    el.libMbBatchBtn.disabled = true;
+    el.libMbBatchBtn.textContent = "Auto-tagging...";
+    showToast("Matching missing album metadata & artwork via MusicBrainz...");
+    try {
+      const res = await apiJson("/api/metadata/musicbrainz/batch", {
+        method: "POST",
+        body: JSON.stringify({ limit: 12 }),
+      });
+      if (res.updatedTracks?.length) rememberTracks(res.updatedTracks);
+      await Promise.all([refreshTrackers(), refreshActivity()]);
+      if (state.route.view === "library") await renderLibraryView();
+      showToast(
+        res.matched > 0
+          ? `Matched ${res.matched} of ${res.processed} track(s) with clean metadata & art.`
+          : `Checked ${res.processed} track(s); no new matches found.`,
+        res.matched > 0 ? "success" : "info"
+      );
+    } catch (err) {
+      showToast(err.message, "error");
+    } finally {
+      el.libMbBatchBtn.disabled = false;
+      el.libMbBatchBtn.textContent = "Auto-Tag Missing Art";
     }
   });
 
@@ -3352,8 +3550,8 @@ function bindEvents() {
     if (!row) return;
     const track = state.trackMap.get(row.getAttribute("data-track-id"));
     const ctx = row.getAttribute("data-list-ctx");
-    if (track?.isPlayable) {
-      const list = getListForContext(ctx).filter((t) => t.isPlayable);
+    if (track && canAttemptPlay(track)) {
+      const list = getListForContext(ctx).filter((t) => canAttemptPlay(t));
       const idx = list.findIndex((t) => t.id === track.id);
       if (idx !== -1) startQueueAndPlay(list, idx, getSourceNameForContext(ctx), false);
       else playTrack(track);
@@ -3624,6 +3822,19 @@ function bindEvents() {
     await refreshCacheStats();
     playNextTrack(true);
   });
+  el.audioEl.addEventListener("canplay", () => {
+    state.preparingTrackId = null;
+    if (state.playingTrack) {
+      const liveBadge = formatCodecShort(state.playingTrack) || state.playingTrack.primaryHost;
+      el.playerCodecBadge.textContent = liveBadge;
+      el.playerCodecBadge.className = `stream-pill ${isTrackLossless(state.playingTrack) ? "lossless" : ""}`;
+      if (state.playingTrack.isUnavailable) {
+        state.playingTrack.isUnavailable = false;
+        rememberTracks([state.playingTrack]);
+        refreshVisibleTrackRows();
+      }
+    }
+  });
   el.audioEl.addEventListener("error", () => {
     if (!state.playingTrack) return;
     if (!el.audioEl.dataset.compatTried && el.audioEl.src && !el.audioEl.src.includes("compat=1")) {
@@ -3634,7 +3845,13 @@ function bindEvents() {
       return;
     }
     if (el.audioEl.dataset.compatTried === "1") {
+      state.preparingTrackId = null;
       el.audioEl.dataset.compatTried = "2";
+      el.playerCodecBadge.textContent = "Unavailable";
+      el.playerCodecBadge.className = "stream-pill";
+      state.playingTrack.isUnavailable = true;
+      rememberTracks([state.playingTrack]);
+      refreshVisibleTrackRows();
       showToast(`Could not decode/play "${state.playingTrack.title}". Try another mirror in Track Inspector.`, "error");
     }
   });
@@ -3886,6 +4103,14 @@ function bindEvents() {
       });
       el.importUrlInput.value = "";
       el.syncModal.classList.add("hidden");
+      if (res.isCollection && res.playlist) {
+        rememberTracks(res.tracks || []);
+        await Promise.all([refreshPlaylists(), refreshTrackers(), refreshActivity()]);
+        showToast(`Imported "${res.playlist.name}" (${res.tracks?.length ?? 0} tracks)`, "success");
+        await navigate({ view: "playlist", playlistId: res.playlist.id });
+        if (res.tracks?.length) startQueueAndPlay(res.tracks, 0, res.playlist.name);
+        return;
+      }
       rememberTracks([res.track]);
       await Promise.all([refreshTrackers(), refreshActivity()]);
       showToast(`Imported "${res.track.title}" by ${res.track.artist}`, "success");
@@ -4004,6 +4229,18 @@ function bindEvents() {
     renderCacheModal(data.cache);
     await refreshCacheStats();
     refreshVisibleTrackRows();
+  });
+  el.cookiesBrowserSelect?.addEventListener("change", async () => {
+    const val = el.cookiesBrowserSelect.value;
+    try {
+      await apiJson("/api/settings/media", {
+        method: "POST",
+        body: JSON.stringify({ cookiesBrowser: val }),
+      });
+      showToast(val ? `yt-dlp will use cookies from ${val}.` : "Disabled browser cookie extraction.", "success");
+    } catch (err) {
+      showToast(err.message, "error");
+    }
   });
   el.cacheEntriesList.addEventListener("click", async (ev) => {
     const btn = ev.target.closest("[data-del-cache]");
@@ -4183,7 +4420,15 @@ async function pollServerVersion() {
   updateVolumeUI();
   renderEqSliders();
   bindEvents();
-  await Promise.all([refreshAllCore(), pollServerVersion()]);
+  await Promise.all([
+    refreshAllCore(),
+    pollServerVersion(),
+    apiJson("/api/settings/media")
+      .then((m) => {
+        if (el.cookiesBrowserSelect) el.cookiesBrowserSelect.value = m.cookiesBrowser || "";
+      })
+      .catch(() => {}),
+  ]);
   await navigate({ view: "home" });
   setInterval(() => void pollServerVersion(), 12000);
 })();

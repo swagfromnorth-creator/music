@@ -17,10 +17,14 @@ import { buildDemoSeedPayload, createDemoAudioResponse, renderDemoArtSvg } from 
 import { ImageProxyCache } from "./images.ts";
 import { LOCAL_LIBRARY_TRACKER_ID, scanLocalMusicFolder } from "./local-library.ts";
 import {
+  fetchOnlineCollectionTracks,
   findFfmpegExecutable,
   findYtDlpExecutable,
   formatDurationSeconds,
+  isCollectionUrl,
   searchOnlineMedia,
+  searchYouTubeMusicCollections,
+  setRuntimeCookiesBrowser,
   streamTranscodedAudio,
 } from "./media-tools.ts";
 import {
@@ -196,6 +200,7 @@ export function createAppServer(options: {
 } = {}): AppContext {
   const dbPath = options.dbPath ?? DB_PATH;
   const db = new AppDatabase(dbPath);
+  setRuntimeCookiesBrowser(db.getCookiesBrowser());
   const rawFetchImpl = options.fetchImpl ?? fetch;
 
   // Transparently serve built-in demo:// lossless WAV streams through the real DiskCacheManager pipeline
@@ -783,6 +788,20 @@ export function createAppServer(options: {
         return;
       }
 
+      // Track runtime availability toggle (greys out failed streams until they work again)
+      const trackAvailMatch = pathname.match(/^\/api\/tracks\/([^/]+)\/availability$/);
+      if (method === "POST" && trackAvailMatch) {
+        const track = db.getTrackById(trackAvailMatch[1]!);
+        if (!track) {
+          sendJson(res, 404, { error: "Track not found" });
+          return;
+        }
+        const body = await readJsonBody<{ unavailable?: boolean }>(req);
+        db.setTrackUnavailable(track.id, Boolean(body.unavailable));
+        sendJson(res, 200, { track: db.getTrackById(track.id) });
+        return;
+      }
+
       // Stream track audio with HTTP byte-range support + progressive ./cache storage
       const trackStreamMatch = pathname.match(/^\/api\/tracks\/([^/]+)\/stream$/);
       if ((method === "GET" || method === "HEAD") && trackStreamMatch) {
@@ -791,11 +810,20 @@ export function createAppServer(options: {
           sendJson(res, 404, { error: "Track not found" });
           return;
         }
+        res.on("finish", () => {
+          if (res.statusCode === 200 || res.statusCode === 206) {
+            if (track.isUnavailable) db.setTrackUnavailable(track.id, false);
+          } else if (res.statusCode >= 400 && res.statusCode !== 416) {
+            db.setTrackUnavailable(track.id, true);
+          }
+        });
+
         const compat = parsedUrl.searchParams.get("compat") === "1";
         const linkIdxParam = parsedUrl.searchParams.get("linkIndex");
         const linkIndex = linkIdxParam !== null ? Number(linkIdxParam) : undefined;
         const { sourceUrl, resolution } = await resolveTrackLink(track, { linkIndex });
         if (!resolution.ok) {
+          db.setTrackUnavailable(track.id, true);
           sendJson(res, 422, {
             error: resolution.errorMessage,
             errorCode: resolution.errorCode,
@@ -961,7 +989,7 @@ export function createAppServer(options: {
         return;
       }
 
-      // Online media discovery via YouTube Music (youtubei.js), YouTube, and SoundCloud (yt-dlp)
+      // Online media discovery via YouTube Music (youtubei.js songs + albums + playlists), YouTube, and SoundCloud (yt-dlp)
       if (method === "GET" && pathname === "/api/discover/search") {
         const q = (parsedUrl.searchParams.get("q") ?? "").trim();
         if (!q) {
@@ -972,12 +1000,114 @@ export function createAppServer(options: {
         const source =
           rawSource === "youtube" || rawSource === "soundcloud" ? rawSource : "ytmusic";
         const limit = Math.min(Math.max(1, Number(parsedUrl.searchParams.get("limit") ?? 12)), 20);
-        const results = await searchOnlineMedia(q, source, limit);
-        sendJson(res, 200, { query: q, source, results });
+        const [results, collections] = await Promise.all([
+          searchOnlineMedia(q, source, limit),
+          source === "ytmusic" ? searchYouTubeMusicCollections(q, 6).catch(() => []) : Promise.resolve([]),
+        ]);
+        sendJson(res, 200, { query: q, source, results, collections });
         return;
       }
 
-      // Import a YouTube / SoundCloud / Bandcamp / direct audio URL into the library
+      async function saveFetchedCollection(input: {
+        kind?: "album" | "playlist";
+        source?: "ytmusic" | "youtube" | "soundcloud";
+        idOrUrl: string;
+        title?: string;
+        artist?: string;
+        thumbnail?: string;
+        savePlaylist?: boolean;
+      }) {
+        const fetched = await fetchOnlineCollectionTracks({
+          kind: input.kind,
+          source: input.source,
+          idOrUrl: input.idOrUrl,
+        });
+        const colTitle = (input.title?.trim() || fetched.title || "Imported Collection").slice(0, 100);
+        const colArtist = input.artist?.trim() || fetched.artist || "Various Artists";
+        const colCover = input.thumbnail?.trim() || fetched.thumbnail || null;
+
+        const savedTracks: TrackRecord[] = [];
+        for (let i = 0; i < fetched.tracks.length; i++) {
+          const item = fetched.tracks[i]!;
+          const host: HostKind = item.source === "soundcloud" ? "soundcloud" : "youtube";
+          const rec = buildImportedTrackRecord({
+            idPrefix: "col_",
+            trackerId: "imported_web",
+            tabName: "Saved URLs",
+            sourceUrl: item.url,
+            title: item.title,
+            artist: item.artist || colArtist,
+            album: item.album || colTitle,
+            thumbnail: item.thumbnail || colCover,
+            durationSec: item.durationSec,
+            year: null,
+            host,
+            notes: `Imported from ${colTitle}`,
+            trackOrder: i,
+          });
+          savedTracks.push(
+            db.upsertImportedTrack(
+              {
+                trackerId: "imported_web",
+                name: "Imported Web Tracks",
+                artistName: "Web & Streaming",
+                tabName: "Saved URLs",
+              },
+              rec
+            )
+          );
+        }
+
+        let playlist = null;
+        if (input.savePlaylist !== false && savedTracks.length > 0) {
+          playlist = db.createPlaylist({
+            name: colTitle,
+            description: `${savedTracks.length} tracks · ${colArtist}`,
+            coverImage: colCover,
+          });
+          for (const tr of savedTracks) {
+            db.addTrackToPlaylist(playlist.id, tr.id);
+          }
+          playlist = db.getPlaylistDetail(playlist.id);
+        }
+
+        db.addActivity(
+          "playlist",
+          `Imported "${colTitle}"`,
+          `${savedTracks.length} tracks from ${colArtist}`
+        );
+
+        return {
+          title: colTitle,
+          artist: colArtist,
+          thumbnail: colCover,
+          tracks: savedTracks,
+          playlist,
+        };
+      }
+
+      // Import a YouTube Music / YouTube / SoundCloud album or playlist into VaultStream
+      if (method === "POST" && pathname === "/api/discover/import-collection") {
+        const body = await readJsonBody<{
+          kind?: "album" | "playlist";
+          source?: "ytmusic" | "youtube" | "soundcloud";
+          idOrUrl?: string;
+          title?: string;
+          artist?: string;
+          thumbnail?: string;
+          savePlaylist?: boolean;
+        }>(req);
+        const idOrUrl = body.idOrUrl?.trim();
+        if (!idOrUrl) {
+          sendJson(res, 400, { error: "Missing 'idOrUrl'" });
+          return;
+        }
+        const saved = await saveFetchedCollection({ ...body, idOrUrl });
+        sendJson(res, 200, saved);
+        return;
+      }
+
+      // Import a YouTube / SoundCloud / Bandcamp / direct audio URL (or playlist URL) into the library
       if (method === "POST" && pathname === "/api/discover/import-url") {
         const body = await readJsonBody<{
           url?: string;
@@ -991,6 +1121,22 @@ export function createAppServer(options: {
         const targetUrl = body.url?.trim();
         if (!targetUrl) {
           sendJson(res, 400, { error: "Missing 'url'" });
+          return;
+        }
+
+        if (isCollectionUrl(targetUrl)) {
+          const saved = await saveFetchedCollection({
+            idOrUrl: targetUrl,
+            title: body.title,
+            artist: body.artist,
+            thumbnail: body.thumbnail,
+          });
+          sendJson(res, 200, {
+            isCollection: true,
+            playlist: saved.playlist,
+            tracks: saved.tracks,
+            track: saved.tracks[0] ?? null,
+          });
           return;
         }
 
@@ -1058,6 +1204,53 @@ export function createAppServer(options: {
 
         db.addActivity("sync", `Imported "${saved.title}"`, `${saved.artist} · ${saved.primaryHost}`);
         sendJson(res, 200, { track: saved, resolution: resolved });
+        return;
+      }
+
+      // Batch MusicBrainz metadata + cover art enrichment for imported/local tracks
+      if (method === "POST" && pathname === "/api/metadata/musicbrainz/batch") {
+        const body = await readJsonBody<{ limit?: number }>(req);
+        const candidates = db.listTracksNeedingMetadata(body.limit ?? 12);
+        const updatedTracks: TrackRecord[] = [];
+        for (const tr of candidates) {
+          const match = await lookupMusicBrainzMetadata(tr.title, tr.artist, rawFetchImpl).catch(() => null);
+          if (match) {
+            const updated = db.updateTrackMetadata(tr.id, {
+              title: match.title,
+              artist: match.artist,
+              era: match.album ?? tr.era,
+              eraImage: match.coverArtUrl ?? tr.eraImage,
+              leakDate: match.year ?? tr.leakDate,
+            });
+            if (updated) updatedTracks.push(updated);
+          }
+        }
+        if (updatedTracks.length > 0) {
+          db.addActivity(
+            "sync",
+            `Auto-tagged ${updatedTracks.length} track(s)`,
+            "Updated titles, albums & square covers via MusicBrainz"
+          );
+        }
+        sendJson(res, 200, {
+          processed: candidates.length,
+          matched: updatedTracks.length,
+          updatedTracks,
+        });
+        return;
+      }
+
+      // Media / extractor settings (e.g. cookies browser for SoundCloud Go+ / YouTube)
+      if (method === "GET" && pathname === "/api/settings/media") {
+        sendJson(res, 200, { cookiesBrowser: db.getCookiesBrowser() });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/settings/media") {
+        const body = await readJsonBody<{ cookiesBrowser?: string }>(req);
+        const saved = db.setCookiesBrowser(body.cookiesBrowser ?? "");
+        setRuntimeCookiesBrowser(saved);
+        sendJson(res, 200, { cookiesBrowser: saved });
         return;
       }
 

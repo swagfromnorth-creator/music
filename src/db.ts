@@ -260,6 +260,11 @@ export class AppDatabase {
       CREATE INDEX IF NOT EXISTS idx_activity_log_at ON activity_log(created_at DESC);
     `);
 
+    const trackCols = this.db.prepare("PRAGMA table_info(tracks)").all() as Array<{ name?: string }>;
+    if (!trackCols.some((c) => c.name === "is_unavailable")) {
+      this.db.exec("ALTER TABLE tracks ADD COLUMN is_unavailable INTEGER NOT NULL DEFAULT 0");
+    }
+
     const existingCap = this.getSetting("max_cache_bytes");
     if (!existingCap) {
       this.setSetting("max_cache_bytes", String(DEFAULT_MAX_CACHE_BYTES));
@@ -298,6 +303,38 @@ export class AppDatabase {
     const clamped = Math.max(1024 * 1024, Math.floor(bytes));
     this.setSetting("max_cache_bytes", String(clamped));
     return clamped;
+  }
+
+  public getCookiesBrowser(): string {
+    return (this.getSetting("ytdlp_cookies_browser") ?? "").trim().toLowerCase();
+  }
+
+  public setCookiesBrowser(browser: string): string {
+    const allowed = new Set(["", "chrome", "edge", "brave", "firefox", "opera", "vivaldi"]);
+    const clean = (browser ?? "").trim().toLowerCase();
+    const safe = allowed.has(clean) ? clean : "";
+    this.setSetting("ytdlp_cookies_browser", safe);
+    return safe;
+  }
+
+  public setTrackUnavailable(id: string, unavailable: boolean): void {
+    this.db.prepare("UPDATE tracks SET is_unavailable = ? WHERE id = ?").run(unavailable ? 1 : 0, id);
+  }
+
+  public listTracksNeedingMetadata(limit = 15): TrackRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT ${this.trackSelectColumns()}
+         FROM tracks t
+         LEFT JOIN cache_entries ce ON ce.source_url = t.primary_url
+         LEFT JOIN liked_tracks lt ON lt.track_id = t.id
+         WHERE t.tracker_id IN ('imported_web', 'local_files', 'spotify_imports')
+           AND (t.era_image IS NULL OR t.era_image = '' OR t.era IN ('Imported', 'Local Library'))
+         ORDER BY t.track_order ASC
+         LIMIT ?`
+      )
+      .all(Math.max(1, Math.min(30, limit))) as Row[];
+    return rows.map((r) => this.mapTrackRow(r));
   }
 
   // ---- User Profile ----
@@ -1972,6 +2009,10 @@ export class AppDatabase {
       resolvedFilename: typeof r.resolved_filename === "string" ? r.resolved_filename : null,
       resolvedAt: typeof r.resolved_at === "number" ? r.resolved_at : null,
       isPlayable: Number(r.is_playable ?? 0) === 1,
+      isUnavailable:
+        Number(r.is_unavailable ?? 0) === 1 ||
+        String(r.tab_name ?? "") === "Unavailable" ||
+        /\b(?:not\s+available|unavailable|inaudible|snippet)\b/i.test(String(r.quality ?? "")),
       audioMeta: safeJsonParse<AudioHeaderInfo | null>(r.audio_meta_json, null),
       cacheStatus:
         typeof r.ce_cache_key === "string"
