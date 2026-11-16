@@ -10,10 +10,11 @@ import { fileURLToPath } from "node:url";
 import { DiskCacheManager } from "./cache.ts";
 import { CACHE_DIR, DATA_DIR, DB_PATH, HOST, PORT } from "./config.ts";
 import { AppDatabase } from "./db.ts";
+import { buildDemoSeedPayload, createDemoAudioResponse, renderDemoArtSvg } from "./demo.ts";
 import { ImageProxyCache } from "./images.ts";
 import { resolveHostUrl, type FetchLike } from "./resolver.ts";
 import { fetchArtTabCovers, fetchDirectoryArtists, fetchTrackerFromArtistGrid } from "./tracker.ts";
-import type { DirectoryArtist, HostResolution, SyncResult, TrackRecord } from "./types.ts";
+import type { DirectoryArtist, HostResolution, SyncResult, TrackRecord, UserProfile } from "./types.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(__dirname, "..", "public");
@@ -70,12 +71,23 @@ export function createAppServer(options: {
 } = {}): AppContext {
   const dbPath = options.dbPath ?? DB_PATH;
   const db = new AppDatabase(dbPath);
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const rawFetchImpl = options.fetchImpl ?? fetch;
+
+  // Transparently serve built-in demo:// lossless WAV streams through the real DiskCacheManager pipeline
+  const fetchImpl: FetchLike = async (input, init) => {
+    if (typeof input === "string" && input.startsWith("demo://")) {
+      const slug = input.slice("demo://".length).replace(/\.wav$/i, "");
+      const headers = new Headers(init?.headers);
+      return createDemoAudioResponse(slug, headers.get("range"));
+    }
+    return rawFetchImpl(input, init);
+  };
+
   const cache = new DiskCacheManager(options.cacheDir ?? CACHE_DIR, db, fetchImpl);
   const imagesDir =
     options.imagesDir ??
     (dbPath === ":memory:" ? path.join(os.tmpdir(), "vaultstream-images") : path.join(path.dirname(dbPath), "images"));
-  const imageCache = new ImageProxyCache(imagesDir, fetchImpl);
+  const imageCache = new ImageProxyCache(imagesDir, rawFetchImpl);
   const publicDir = options.publicDir ?? PUBLIC_DIR;
 
   let directoryCache: { fetchedAt: number; artists: DirectoryArtist[] } | null = null;
@@ -99,6 +111,23 @@ export function createAppServer(options: {
           host: track.primaryHost,
           errorCode: "no_playable_links",
           errorMessage: "This track has no playable audio host links.",
+        },
+      };
+    }
+
+    const firstCandidate = candidateLinks[0]!;
+    if (firstCandidate.url.startsWith("demo://")) {
+      return {
+        sourceUrl: firstCandidate.url,
+        resolution: {
+          ok: true,
+          sourceUrl: firstCandidate.url,
+          resolvedUrl: firstCandidate.url,
+          host: "direct",
+          mimeType: "audio/wav",
+          filename: firstCandidate.url.slice("demo://".length),
+          sizeBytes: null,
+          formatHint: "wav",
         },
       };
     }
@@ -129,7 +158,7 @@ export function createAppServer(options: {
 
     let lastFailure: HostResolution | null = null;
     for (const link of candidateLinks) {
-      const resolved = await resolveHostUrl(link.url, fetchImpl);
+      const resolved = await resolveHostUrl(link.url, rawFetchImpl);
       if (resolved.ok) {
         if (link.url === track.primaryUrl || opts.linkIndex === undefined) {
           db.updateTrackResolution(track.id, {
@@ -187,7 +216,27 @@ export function createAppServer(options: {
         return;
       }
 
-      // Cover art proxy + disk cache (strips Referer to avoid Google Sheets 429, falls back cleanly)
+      // Demo studio artwork SVG endpoint
+      const demoArtMatch = pathname.match(/^\/api\/demo\/art\/([a-z0-9-]+)$/i);
+      if (method === "GET" && demoArtMatch) {
+        const svg = renderDemoArtSvg(demoArtMatch[1]!);
+        res.writeHead(200, {
+          "Content-Type": "image/svg+xml; charset=utf-8",
+          "Content-Length": Buffer.byteLength(svg),
+          "Cache-Control": "public, max-age=86400",
+        });
+        res.end(svg);
+        return;
+      }
+
+      // Optional interactive Demo Studio Showcase seeder
+      if (method === "POST" && pathname === "/api/demo/seed") {
+        const summary = db.seedDemoLibrary(buildDemoSeedPayload());
+        sendJson(res, 200, { ok: true, ...summary });
+        return;
+      }
+
+      // Cover art proxy + disk cache
       if (method === "GET" && pathname === "/api/image") {
         const targetUrl = parsedUrl.searchParams.get("url") ?? "";
         const artist = parsedUrl.searchParams.get("artist") ?? undefined;
@@ -196,11 +245,252 @@ export function createAppServer(options: {
         return;
       }
 
+      // User Profile
+      if (method === "GET" && pathname === "/api/profile") {
+        const profile = db.getUserProfile();
+        const trackers = db.listTrackers();
+        const playlists = db.listPlaylists();
+        const likedCount = db.getLikedTrackIds().length;
+        const followedCount = db.getFollowedTrackerIds().length;
+        const playsCount = db.getTotalPlaysCount();
+        const cacheStats = cache.getStats();
+        sendJson(res, 200, {
+          profile,
+          stats: {
+            likedCount,
+            playlistCount: playlists.length,
+            trackerCount: trackers.length,
+            followedCount,
+            playsCount,
+            cachedCount: cacheStats.entryCount,
+            cachedBytes: cacheStats.totalCachedBytes,
+          },
+        });
+        return;
+      }
+
+      if (method === "PUT" && pathname === "/api/profile") {
+        const body = await readJsonBody<Partial<UserProfile>>(req);
+        const profile = db.updateUserProfile(body);
+        sendJson(res, 200, { profile });
+        return;
+      }
+
+      // Activity / Notifications
+      if (method === "GET" && pathname === "/api/activity") {
+        const items = db.listActivity(25);
+        const unreadCount = items.filter((a) => !a.isRead).length;
+        sendJson(res, 200, { items, unreadCount });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/activity/read") {
+        db.markAllActivityRead();
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
+      // Liked tracks & followed artists
+      if (method === "GET" && pathname === "/api/likes") {
+        sendJson(res, 200, {
+          likedIds: db.getLikedTrackIds(),
+          tracks: db.listLikedTracks(),
+          followedTrackerIds: db.getFollowedTrackerIds(),
+        });
+        return;
+      }
+
+      const likeMatch = pathname.match(/^\/api\/likes\/([^/]+)$/);
+      if (likeMatch && (method === "POST" || method === "DELETE")) {
+        const trackId = likeMatch[1]!;
+        let desired: boolean | undefined = method === "DELETE" ? false : undefined;
+        if (method === "POST") {
+          const body = await readJsonBody<{ liked?: boolean }>(req);
+          if (typeof body.liked === "boolean") desired = body.liked;
+        }
+        const liked = db.toggleLikeTrack(trackId, desired);
+        sendJson(res, 200, { trackId, liked, likedCount: db.getLikedTrackIds().length });
+        return;
+      }
+
+      // Follow artist/tracker
+      const followTrackerMatch = pathname.match(/^\/api\/trackers\/([^/]+)\/follow$/);
+      if (method === "POST" && followTrackerMatch) {
+        const trackerId = followTrackerMatch[1]!;
+        const body = await readJsonBody<{ followed?: boolean }>(req);
+        const followed = db.toggleFollowTracker(
+          trackerId,
+          typeof body.followed === "boolean" ? body.followed : undefined
+        );
+        sendJson(res, 200, { trackerId, followed });
+        return;
+      }
+
+      // Playlists CRUD
+      if (method === "GET" && pathname === "/api/playlists") {
+        sendJson(res, 200, { playlists: db.listPlaylists() });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/playlists") {
+        const body = await readJsonBody<{
+          name?: string;
+          description?: string;
+          coverGradient?: string;
+          coverImage?: string | null;
+        }>(req);
+        const name = (body.name ?? "").trim();
+        if (!name) {
+          sendJson(res, 400, { error: "Playlist name is required." });
+          return;
+        }
+        const playlist = db.createPlaylist({
+          name,
+          description: body.description,
+          coverGradient: body.coverGradient,
+          coverImage: body.coverImage,
+        });
+        db.addActivity("playlist", `Created playlist "${playlist.name}"`, playlist.description || "Ready for tracks.");
+        sendJson(res, 201, { playlist });
+        return;
+      }
+
+      const playlistTracksReorderMatch = pathname.match(/^\/api\/playlists\/([^/]+)\/tracks\/reorder$/);
+      if (method === "PUT" && playlistTracksReorderMatch) {
+        const playlistId = playlistTracksReorderMatch[1]!;
+        const body = await readJsonBody<{ trackIds?: string[] }>(req);
+        if (!Array.isArray(body.trackIds)) {
+          sendJson(res, 400, { error: "Provide 'trackIds' array." });
+          return;
+        }
+        db.reorderPlaylistTracks(playlistId, body.trackIds);
+        sendJson(res, 200, { playlist: db.getPlaylistDetail(playlistId) });
+        return;
+      }
+
+      const playlistTrackItemMatch = pathname.match(/^\/api\/playlists\/([^/]+)\/tracks\/([^/]+)$/);
+      if (method === "DELETE" && playlistTrackItemMatch) {
+        const [, playlistId, trackId] = playlistTrackItemMatch;
+        db.removeTrackFromPlaylist(playlistId!, trackId!);
+        sendJson(res, 200, { playlist: db.getPlaylistDetail(playlistId!) });
+        return;
+      }
+
+      const playlistTracksMatch = pathname.match(/^\/api\/playlists\/([^/]+)\/tracks$/);
+      if (method === "POST" && playlistTracksMatch) {
+        const playlistId = playlistTracksMatch[1]!;
+        const body = await readJsonBody<{ trackId?: string }>(req);
+        if (!body.trackId) {
+          sendJson(res, 400, { error: "Missing 'trackId'." });
+          return;
+        }
+        const added = db.addTrackToPlaylist(playlistId, body.trackId);
+        sendJson(res, 200, { added, playlist: db.getPlaylistDetail(playlistId) });
+        return;
+      }
+
+      const playlistItemMatch = pathname.match(/^\/api\/playlists\/([^/]+)$/);
+      if (playlistItemMatch) {
+        const playlistId = playlistItemMatch[1]!;
+        if (method === "GET") {
+          const detail = db.getPlaylistDetail(playlistId);
+          if (!detail) {
+            sendJson(res, 404, { error: "Playlist not found" });
+            return;
+          }
+          sendJson(res, 200, { playlist: detail });
+          return;
+        }
+        if (method === "PATCH") {
+          const body = await readJsonBody<{
+            name?: string;
+            description?: string;
+            coverGradient?: string;
+            coverImage?: string | null;
+          }>(req);
+          const updated = db.updatePlaylist(playlistId, body);
+          if (!updated) {
+            sendJson(res, 404, { error: "Playlist not found" });
+            return;
+          }
+          sendJson(res, 200, { playlist: updated });
+          return;
+        }
+        if (method === "DELETE") {
+          db.deletePlaylist(playlistId);
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+      }
+
+      // Play History
+      if (method === "GET" && pathname === "/api/history") {
+        const limit = Number(parsedUrl.searchParams.get("limit") ?? 40);
+        sendJson(res, 200, {
+          items: db.listPlayHistory(limit),
+          totalPlays: db.getTotalPlaysCount(),
+        });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/history") {
+        const body = await readJsonBody<{ trackId?: string }>(req);
+        if (!body.trackId) {
+          sendJson(res, 400, { error: "Missing 'trackId'." });
+          return;
+        }
+        db.recordPlay(body.trackId);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
+      // Recent Searches
+      if (method === "GET" && pathname === "/api/recent-searches") {
+        sendJson(res, 200, { items: db.listRecentSearches(12) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/recent-searches") {
+        const body = await readJsonBody<{
+          query?: string;
+          itemType?: "query" | "track" | "artist" | "era" | "playlist";
+          itemId?: string | null;
+          subtitle?: string | null;
+          imageUrl?: string | null;
+        }>(req);
+        if (!body.query?.trim()) {
+          sendJson(res, 400, { error: "Missing 'query'." });
+          return;
+        }
+        const item = db.addRecentSearch({
+          query: body.query,
+          itemType: body.itemType,
+          itemId: body.itemId,
+          subtitle: body.subtitle,
+          imageUrl: body.imageUrl,
+        });
+        sendJson(res, 201, { item, items: db.listRecentSearches(12) });
+        return;
+      }
+
+      if (method === "DELETE" && pathname === "/api/recent-searches") {
+        db.clearRecentSearches();
+        sendJson(res, 200, { items: [] });
+        return;
+      }
+
+      const delRecentMatch = pathname.match(/^\/api\/recent-searches\/(\d+)$/);
+      if (method === "DELETE" && delRecentMatch) {
+        db.deleteRecentSearch(Number(delRecentMatch[1]));
+        sendJson(res, 200, { items: db.listRecentSearches(12) });
+        return;
+      }
+
       // ArtistGrid Directory
       if (method === "GET" && pathname === "/api/directory") {
         const now = Date.now();
         if (!directoryCache || now - directoryCache.fetchedAt > 1000 * 60 * 30) {
-          const artists = await fetchDirectoryArtists(fetchImpl);
+          const artists = await fetchDirectoryArtists(rawFetchImpl);
           directoryCache = { fetchedAt: now, artists };
         }
         const q = (parsedUrl.searchParams.get("q") ?? "").trim().toLowerCase();
@@ -239,7 +529,7 @@ export function createAppServer(options: {
           tabGid: body.tabGid,
           tabSlug: body.tabSlug,
           tabName: body.tabName,
-          fetchImpl,
+          fetchImpl: rawFetchImpl,
         });
         const tracker = db.upsertSyncedTracker(normalized.tracker, normalized.tracks);
         const result: SyncResult = {
@@ -250,6 +540,11 @@ export function createAppServer(options: {
           erasCount: normalized.erasCount,
           elapsedMs: Math.round((performance.now() - started) * 10) / 10,
         };
+        db.addActivity(
+          "sync",
+          `Synced ${tracker.artistName}`,
+          `${result.tracksSynced} tracks indexed from "${result.tabSynced}" in ${result.elapsedMs} ms.`
+        );
         sendJson(res, 200, result);
         return;
       }
@@ -367,6 +662,11 @@ export function createAppServer(options: {
           sourceUrl,
           resolvedUrl: resolution.resolvedUrl,
         });
+        db.addActivity(
+          "cache",
+          `Saved "${track.title}" offline`,
+          `${track.artist} · ${track.era} cached to disk.`
+        );
         sendJson(res, 200, {
           entry,
           track: db.getTrackById(track.id),
@@ -382,7 +682,7 @@ export function createAppServer(options: {
           sendJson(res, 400, { error: "Missing 'url'" });
           return;
         }
-        const resolution = await resolveHostUrl(body.url, fetchImpl);
+        const resolution = await resolveHostUrl(body.url, rawFetchImpl);
         sendJson(res, resolution.ok ? 200 : 422, resolution);
         return;
       }
@@ -468,6 +768,7 @@ if (isEntrypoint) {
     // Backfill permanent Art-tab cover URLs for any already-synced trackers
     void (async () => {
       for (const t of ctx.db.listTrackers()) {
+        if (t.trackerId.startsWith("demo_")) continue;
         try {
           const covers = await fetchArtTabCovers(t.trackerId, t.tabs);
           if (covers.size > 0) {

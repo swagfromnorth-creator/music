@@ -1,23 +1,40 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { DEFAULT_MAX_CACHE_BYTES } from "./config.ts";
+import type { DemoSeedPayload } from "./demo.ts";
 import { lookupArtCover } from "./tracker.ts";
 import type {
+  ActivityRecord,
   AudioHeaderInfo,
   ByteRange,
   CacheEntry,
   EraFacet,
   HostKind,
+  PlayHistoryItem,
+  PlaylistDetail,
+  PlaylistRecord,
+  RecentSearchRecord,
   SearchParams,
   SearchResult,
   TrackerRecord,
   TrackerTabMeta,
   TrackLink,
   TrackRecord,
+  UserProfile,
 } from "./types.ts";
 
 type Row = Record<string, unknown>;
+
+const DEFAULT_PROFILE: UserProfile = {
+  name: "Listener",
+  handle: "@vaultstream",
+  bio: "Lossless archive collector & studio session curator.",
+  avatarPreset: "violet",
+  avatarUrl: null,
+  accentColor: "#7c4dff",
+};
 
 export function buildFtsMatchQuery(input: string): { ftsQuery: string | null; fallbackLike: string | null } {
   const trimmed = input.trim();
@@ -168,6 +185,71 @@ export class AppDatabase {
       CREATE INDEX IF NOT EXISTS idx_cache_lru ON cache_entries(last_accessed_at ASC);
       CREATE INDEX IF NOT EXISTS idx_cache_source_url ON cache_entries(source_url);
       CREATE INDEX IF NOT EXISTS idx_cache_track_id ON cache_entries(track_id);
+
+      CREATE TABLE IF NOT EXISTS liked_tracks (
+        track_id TEXT PRIMARY KEY,
+        liked_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_liked_tracks_at ON liked_tracks(liked_at DESC);
+
+      CREATE TABLE IF NOT EXISTS followed_trackers (
+        tracker_id TEXT PRIMARY KEY,
+        followed_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS playlists (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        cover_gradient TEXT NOT NULL DEFAULT '',
+        cover_image TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS playlist_tracks (
+        playlist_id TEXT NOT NULL,
+        track_id TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        added_at INTEGER NOT NULL,
+        PRIMARY KEY (playlist_id, track_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_playlist_tracks_order
+        ON playlist_tracks(playlist_id, position ASC, added_at ASC);
+
+      CREATE TABLE IF NOT EXISTS play_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        track_id TEXT NOT NULL,
+        played_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_play_history_track_id ON play_history(track_id);
+
+      CREATE TABLE IF NOT EXISTS recent_searches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        query TEXT NOT NULL,
+        item_type TEXT NOT NULL DEFAULT 'query',
+        item_id TEXT,
+        subtitle TEXT,
+        image_url TEXT,
+        searched_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_recent_searches_at ON recent_searches(searched_at DESC);
+
+      CREATE TABLE IF NOT EXISTS activity_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind TEXT NOT NULL,
+        title TEXT NOT NULL,
+        detail TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        is_read INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_activity_log_at ON activity_log(created_at DESC);
     `);
 
     const existingCap = this.getSetting("max_cache_bytes");
@@ -204,6 +286,42 @@ export class AppDatabase {
     this.setSetting("max_cache_bytes", String(clamped));
     return clamped;
   }
+
+  // ---- User Profile ----
+
+  public getUserProfile(): UserProfile {
+    const raw = this.getSetting("user_profile");
+    const parsed = safeJsonParse<Partial<UserProfile>>(raw, {});
+    return {
+      ...DEFAULT_PROFILE,
+      ...parsed,
+    };
+  }
+
+  public updateUserProfile(patch: Partial<UserProfile>): UserProfile {
+    const current = this.getUserProfile();
+    const updated: UserProfile = {
+      name: typeof patch.name === "string" && patch.name.trim() ? patch.name.trim().slice(0, 60) : current.name,
+      handle:
+        typeof patch.handle === "string" && patch.handle.trim()
+          ? patch.handle.trim().slice(0, 40)
+          : current.handle,
+      bio: typeof patch.bio === "string" ? patch.bio.trim().slice(0, 200) : current.bio,
+      avatarPreset:
+        typeof patch.avatarPreset === "string" && patch.avatarPreset.trim()
+          ? patch.avatarPreset.trim()
+          : current.avatarPreset,
+      avatarUrl: patch.avatarUrl !== undefined ? (patch.avatarUrl?.trim() || null) : current.avatarUrl,
+      accentColor:
+        typeof patch.accentColor === "string" && /^#[0-9a-fA-F]{6}$/.test(patch.accentColor.trim())
+          ? patch.accentColor.trim()
+          : current.accentColor,
+    };
+    this.setSetting("user_profile", JSON.stringify(updated));
+    return updated;
+  }
+
+  // ---- Trackers ----
 
   public upsertSyncedTracker(
     trackerMeta: Omit<TrackerRecord, "syncedTabs" | "lastSyncedAt">,
@@ -378,14 +496,28 @@ export class AppDatabase {
 
   public listTrackers(): TrackerRecord[] {
     const rows = this.db
-      .prepare("SELECT * FROM trackers ORDER BY last_synced_at DESC")
+      .prepare(
+        `SELECT tr.*,
+                CASE WHEN ft.tracker_id IS NOT NULL THEN 1 ELSE 0 END AS is_followed,
+                (SELECT era_image FROM tracks WHERE tracker_id = tr.tracker_id AND era_image IS NOT NULL AND era_image != '' ORDER BY era_order ASC, track_order ASC LIMIT 1) AS cover_image
+         FROM trackers tr
+         LEFT JOIN followed_trackers ft ON ft.tracker_id = tr.tracker_id
+         ORDER BY tr.last_synced_at DESC`
+      )
       .all() as Row[];
     return rows.map((r) => this.mapTrackerRow(r));
   }
 
   public getTracker(trackerId: string): TrackerRecord | null {
     const row = this.db
-      .prepare("SELECT * FROM trackers WHERE tracker_id = ?")
+      .prepare(
+        `SELECT tr.*,
+                CASE WHEN ft.tracker_id IS NOT NULL THEN 1 ELSE 0 END AS is_followed,
+                (SELECT era_image FROM tracks WHERE tracker_id = tr.tracker_id AND era_image IS NOT NULL AND era_image != '' ORDER BY era_order ASC, track_order ASC LIMIT 1) AS cover_image
+         FROM trackers tr
+         LEFT JOIN followed_trackers ft ON ft.tracker_id = tr.tracker_id
+         WHERE tr.tracker_id = ?`
+      )
       .get(trackerId) as Row | undefined;
     return row ? this.mapTrackerRow(row) : null;
   }
@@ -393,6 +525,16 @@ export class AppDatabase {
   public deleteTracker(trackerId: string): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      this.db
+        .prepare("DELETE FROM playlist_tracks WHERE track_id IN (SELECT id FROM tracks WHERE tracker_id = ?)")
+        .run(trackerId);
+      this.db
+        .prepare("DELETE FROM liked_tracks WHERE track_id IN (SELECT id FROM tracks WHERE tracker_id = ?)")
+        .run(trackerId);
+      this.db
+        .prepare("DELETE FROM play_history WHERE track_id IN (SELECT id FROM tracks WHERE tracker_id = ?)")
+        .run(trackerId);
+      this.db.prepare("DELETE FROM followed_trackers WHERE tracker_id = ?").run(trackerId);
       this.db.prepare("DELETE FROM tracks WHERE tracker_id = ?").run(trackerId);
       this.db.prepare("DELETE FROM trackers WHERE tracker_id = ?").run(trackerId);
       this.db.exec("COMMIT");
@@ -402,17 +544,50 @@ export class AppDatabase {
     }
   }
 
+  public toggleFollowTracker(trackerId: string, desired?: boolean): boolean {
+    const existing = this.db
+      .prepare("SELECT tracker_id FROM followed_trackers WHERE tracker_id = ?")
+      .get(trackerId) as Row | undefined;
+    const next = desired !== undefined ? desired : !existing;
+    if (next) {
+      this.db
+        .prepare(
+          "INSERT INTO followed_trackers(tracker_id, followed_at) VALUES (?, ?) ON CONFLICT(tracker_id) DO NOTHING"
+        )
+        .run(trackerId, Date.now());
+    } else {
+      this.db.prepare("DELETE FROM followed_trackers WHERE tracker_id = ?").run(trackerId);
+    }
+    return next;
+  }
+
+  public getFollowedTrackerIds(): string[] {
+    const rows = this.db
+      .prepare("SELECT tracker_id FROM followed_trackers ORDER BY followed_at DESC")
+      .all() as Row[];
+    return rows.map((r) => String(r.tracker_id));
+  }
+
+  // ---- Tracks ----
+
+  private trackSelectColumns(): string {
+    return `t.*,
+      ce.cache_key AS ce_cache_key,
+      ce.cached_bytes AS ce_cached_bytes,
+      ce.total_bytes AS ce_total_bytes,
+      ce.is_complete AS ce_is_complete,
+      ce.last_accessed_at AS ce_last_accessed_at,
+      CASE WHEN lt.track_id IS NOT NULL THEN 1 ELSE 0 END AS is_liked,
+      COALESCE((SELECT COUNT(*) FROM play_history ph WHERE ph.track_id = t.id), 0) AS play_count`;
+  }
+
   public getTrackById(id: string): TrackRecord | null {
     const row = this.db
       .prepare(
-        `SELECT t.*,
-                ce.cache_key AS ce_cache_key,
-                ce.cached_bytes AS ce_cached_bytes,
-                ce.total_bytes AS ce_total_bytes,
-                ce.is_complete AS ce_is_complete,
-                ce.last_accessed_at AS ce_last_accessed_at
+        `SELECT ${this.trackSelectColumns()}
          FROM tracks t
          LEFT JOIN cache_entries ce ON ce.source_url = t.primary_url
+         LEFT JOIN liked_tracks lt ON lt.track_id = t.id
          WHERE t.id = ?`
       )
       .get(id) as Row | undefined;
@@ -529,15 +704,11 @@ export class AppDatabase {
 
     const rows = this.db
       .prepare(
-        `SELECT t.*,
-                ce.cache_key AS ce_cache_key,
-                ce.cached_bytes AS ce_cached_bytes,
-                ce.total_bytes AS ce_total_bytes,
-                ce.is_complete AS ce_is_complete,
-                ce.last_accessed_at AS ce_last_accessed_at
+        `SELECT ${this.trackSelectColumns()}
          FROM tracks t
          ${ftsJoin}
          LEFT JOIN cache_entries ce ON ce.source_url = t.primary_url
+         LEFT JOIN liked_tracks lt ON lt.track_id = t.id
          ${whereClause}
          ORDER BY ${orderBy}
          LIMIT ? OFFSET ?`
@@ -608,6 +779,448 @@ export class AppDatabase {
       qualities,
     };
   }
+
+  // ---- Liked Tracks ----
+
+  public toggleLikeTrack(trackId: string, desired?: boolean): boolean {
+    const existing = this.db
+      .prepare("SELECT track_id FROM liked_tracks WHERE track_id = ?")
+      .get(trackId) as Row | undefined;
+    const next = desired !== undefined ? desired : !existing;
+    if (next) {
+      this.db
+        .prepare("INSERT INTO liked_tracks(track_id, liked_at) VALUES (?, ?) ON CONFLICT(track_id) DO NOTHING")
+        .run(trackId, Date.now());
+    } else {
+      this.db.prepare("DELETE FROM liked_tracks WHERE track_id = ?").run(trackId);
+    }
+    return next;
+  }
+
+  public getLikedTrackIds(): string[] {
+    const rows = this.db.prepare("SELECT track_id FROM liked_tracks ORDER BY liked_at DESC").all() as Row[];
+    return rows.map((r) => String(r.track_id));
+  }
+
+  public listLikedTracks(): TrackRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT ${this.trackSelectColumns()}
+         FROM liked_tracks lt
+         INNER JOIN tracks t ON t.id = lt.track_id
+         LEFT JOIN cache_entries ce ON ce.source_url = t.primary_url
+         ORDER BY lt.liked_at DESC`
+      )
+      .all() as Row[];
+    return rows.map((r) => this.mapTrackRow(r));
+  }
+
+  // ---- Playlists ----
+
+  public listPlaylists(): PlaylistRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT p.*,
+                (SELECT COUNT(*) FROM playlist_tracks pt INNER JOIN tracks t ON t.id = pt.track_id WHERE pt.playlist_id = p.id) AS track_count
+         FROM playlists p
+         ORDER BY p.updated_at DESC, p.created_at DESC`
+      )
+      .all() as Row[];
+
+    return rows.map((r) => {
+      const id = String(r.id);
+      const previewRows = this.db
+        .prepare(
+          `SELECT DISTINCT t.era_image
+           FROM playlist_tracks pt
+           INNER JOIN tracks t ON t.id = pt.track_id
+           WHERE pt.playlist_id = ? AND t.era_image IS NOT NULL AND t.era_image != ''
+           ORDER BY pt.position ASC, pt.added_at ASC
+           LIMIT 4`
+        )
+        .all(id) as Row[];
+
+      return {
+        id,
+        name: String(r.name),
+        description: String(r.description ?? ""),
+        coverGradient: String(r.cover_gradient ?? ""),
+        coverImage: typeof r.cover_image === "string" ? r.cover_image : null,
+        trackCount: Number(r.track_count ?? 0),
+        previewImages: previewRows.map((pr) => String(pr.era_image)),
+        createdAt: Number(r.created_at ?? 0),
+        updatedAt: Number(r.updated_at ?? 0),
+      };
+    });
+  }
+
+  public getPlaylistDetail(playlistId: string): PlaylistDetail | null {
+    const playlist = this.listPlaylists().find((p) => p.id === playlistId);
+    if (!playlist) return null;
+
+    const rows = this.db
+      .prepare(
+        `SELECT ${this.trackSelectColumns()}
+         FROM playlist_tracks pt
+         INNER JOIN tracks t ON t.id = pt.track_id
+         LEFT JOIN cache_entries ce ON ce.source_url = t.primary_url
+         LEFT JOIN liked_tracks lt ON lt.track_id = t.id
+         WHERE pt.playlist_id = ?
+         ORDER BY pt.position ASC, pt.added_at ASC`
+      )
+      .all(playlistId) as Row[];
+
+    return {
+      ...playlist,
+      tracks: rows.map((r) => this.mapTrackRow(r)),
+    };
+  }
+
+  public createPlaylist(input: {
+    name: string;
+    description?: string;
+    coverGradient?: string;
+    coverImage?: string | null;
+  }): PlaylistRecord {
+    const id = `pl_${crypto.randomBytes(8).toString("hex")}`;
+    const now = Date.now();
+    const gradients = [
+      "linear-gradient(135deg, #7c4dff, #ec4899)",
+      "linear-gradient(135deg, #2563eb, #06b6d4)",
+      "linear-gradient(135deg, #be123c, #581c87)",
+      "linear-gradient(135deg, #059669, #0284c7)",
+      "linear-gradient(135deg, #d97706, #dc2626)",
+    ];
+    const gradient =
+      input.coverGradient?.trim() || gradients[Math.floor(Math.random() * gradients.length)]!;
+
+    this.db
+      .prepare(
+        `INSERT INTO playlists(id, name, description, cover_gradient, cover_image, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        input.name.trim().slice(0, 100),
+        (input.description ?? "").trim().slice(0, 300),
+        gradient,
+        input.coverImage ?? null,
+        now,
+        now
+      );
+
+    return {
+      id,
+      name: input.name.trim().slice(0, 100),
+      description: (input.description ?? "").trim().slice(0, 300),
+      coverGradient: gradient,
+      coverImage: input.coverImage ?? null,
+      trackCount: 0,
+      previewImages: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  public updatePlaylist(
+    playlistId: string,
+    patch: { name?: string; description?: string; coverGradient?: string; coverImage?: string | null }
+  ): PlaylistRecord | null {
+    const existing = this.listPlaylists().find((p) => p.id === playlistId);
+    if (!existing) return null;
+
+    const name = patch.name !== undefined && patch.name.trim() ? patch.name.trim().slice(0, 100) : existing.name;
+    const description =
+      patch.description !== undefined ? patch.description.trim().slice(0, 300) : existing.description;
+    const coverGradient =
+      patch.coverGradient !== undefined ? patch.coverGradient.trim() : existing.coverGradient;
+    const coverImage = patch.coverImage !== undefined ? patch.coverImage : existing.coverImage;
+    const now = Date.now();
+
+    this.db
+      .prepare(
+        `UPDATE playlists SET name = ?, description = ?, cover_gradient = ?, cover_image = ?, updated_at = ?
+         WHERE id = ?`
+      )
+      .run(name, description, coverGradient, coverImage, now, playlistId);
+
+    return this.listPlaylists().find((p) => p.id === playlistId) ?? null;
+  }
+
+  public deletePlaylist(playlistId: string): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM playlist_tracks WHERE playlist_id = ?").run(playlistId);
+      const info = this.db.prepare("DELETE FROM playlists WHERE id = ?").run(playlistId);
+      this.db.exec("COMMIT");
+      return Number(info.changes ?? 0) > 0;
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  public addTrackToPlaylist(playlistId: string, trackId: string): boolean {
+    const maxRow = this.db
+      .prepare("SELECT COALESCE(MAX(position), -1) AS max_pos FROM playlist_tracks WHERE playlist_id = ?")
+      .get(playlistId) as Row;
+    const nextPos = Number(maxRow.max_pos ?? -1) + 1;
+    const now = Date.now();
+    const info = this.db
+      .prepare(
+        `INSERT INTO playlist_tracks(playlist_id, track_id, position, added_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(playlist_id, track_id) DO NOTHING`
+      )
+      .run(playlistId, trackId, nextPos, now);
+    this.db.prepare("UPDATE playlists SET updated_at = ? WHERE id = ?").run(now, playlistId);
+    return Number(info.changes ?? 0) > 0;
+  }
+
+  public removeTrackFromPlaylist(playlistId: string, trackId: string): boolean {
+    const info = this.db
+      .prepare("DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?")
+      .run(playlistId, trackId);
+    this.db.prepare("UPDATE playlists SET updated_at = ? WHERE id = ?").run(Date.now(), playlistId);
+    return Number(info.changes ?? 0) > 0;
+  }
+
+  public reorderPlaylistTracks(playlistId: string, orderedTrackIds: string[]): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const stmt = this.db.prepare(
+        "UPDATE playlist_tracks SET position = ? WHERE playlist_id = ? AND track_id = ?"
+      );
+      orderedTrackIds.forEach((trackId, index) => {
+        stmt.run(index, playlistId, trackId);
+      });
+      this.db.prepare("UPDATE playlists SET updated_at = ? WHERE id = ?").run(Date.now(), playlistId);
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  // ---- Play History ----
+
+  public recordPlay(trackId: string): void {
+    this.db
+      .prepare("INSERT INTO play_history(track_id, played_at) VALUES (?, ?)")
+      .run(trackId, Date.now());
+  }
+
+  public listPlayHistory(limit = 40): PlayHistoryItem[] {
+    const rows = this.db
+      .prepare(
+        `SELECT ph.id AS ph_id, ph.played_at AS ph_played_at, ${this.trackSelectColumns()}
+         FROM play_history ph
+         INNER JOIN tracks t ON t.id = ph.track_id
+         LEFT JOIN cache_entries ce ON ce.source_url = t.primary_url
+         LEFT JOIN liked_tracks lt ON lt.track_id = t.id
+         ORDER BY ph.played_at DESC
+         LIMIT ?`
+      )
+      .all(Math.min(Math.max(1, limit), 150)) as Row[];
+
+    return rows.map((r) => ({
+      id: Number(r.ph_id),
+      trackId: String(r.id),
+      playedAt: Number(r.ph_played_at),
+      track: this.mapTrackRow(r),
+    }));
+  }
+
+  public getTotalPlaysCount(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS cnt FROM play_history").get() as Row;
+    return Number(row.cnt ?? 0);
+  }
+
+  // ---- Recent Searches ----
+
+  public listRecentSearches(limit = 10): RecentSearchRecord[] {
+    const rows = this.db
+      .prepare("SELECT * FROM recent_searches ORDER BY searched_at DESC LIMIT ?")
+      .all(Math.min(Math.max(1, limit), 30)) as Row[];
+
+    return rows.map((r) => ({
+      id: Number(r.id),
+      query: String(r.query),
+      itemType: (String(r.item_type || "query") as RecentSearchRecord["itemType"]),
+      itemId: typeof r.item_id === "string" ? r.item_id : null,
+      subtitle: typeof r.subtitle === "string" ? r.subtitle : null,
+      imageUrl: typeof r.image_url === "string" ? r.image_url : null,
+      searchedAt: Number(r.searched_at ?? 0),
+    }));
+  }
+
+  public addRecentSearch(entry: {
+    query: string;
+    itemType?: RecentSearchRecord["itemType"];
+    itemId?: string | null;
+    subtitle?: string | null;
+    imageUrl?: string | null;
+  }): RecentSearchRecord {
+    const cleanQuery = entry.query.trim().slice(0, 120);
+    const itemType = entry.itemType ?? "query";
+    const now = Date.now();
+
+    // Deduplicate identical query + type
+    this.db
+      .prepare("DELETE FROM recent_searches WHERE LOWER(query) = LOWER(?) AND item_type = ?")
+      .run(cleanQuery, itemType);
+
+    const info = this.db
+      .prepare(
+        `INSERT INTO recent_searches(query, item_type, item_id, subtitle, image_url, searched_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        cleanQuery,
+        itemType,
+        entry.itemId ?? null,
+        entry.subtitle ?? null,
+        entry.imageUrl ?? null,
+        now
+      );
+
+    // Keep latest 20 entries
+    this.db
+      .prepare(
+        `DELETE FROM recent_searches WHERE id NOT IN (
+           SELECT id FROM recent_searches ORDER BY searched_at DESC LIMIT 20
+         )`
+      )
+      .run();
+
+    return {
+      id: Number(info.lastInsertRowid),
+      query: cleanQuery,
+      itemType,
+      itemId: entry.itemId ?? null,
+      subtitle: entry.subtitle ?? null,
+      imageUrl: entry.imageUrl ?? null,
+      searchedAt: now,
+    };
+  }
+
+  public deleteRecentSearch(id: number): void {
+    this.db.prepare("DELETE FROM recent_searches WHERE id = ?").run(id);
+  }
+
+  public clearRecentSearches(): void {
+    this.db.prepare("DELETE FROM recent_searches").run();
+  }
+
+  // ---- Activity / Notifications ----
+
+  public addActivity(kind: ActivityRecord["kind"], title: string, detail = ""): ActivityRecord {
+    const now = Date.now();
+    const info = this.db
+      .prepare(
+        `INSERT INTO activity_log(kind, title, detail, created_at, is_read)
+         VALUES (?, ?, ?, ?, 0)`
+      )
+      .run(kind, title.slice(0, 120), detail.slice(0, 260), now);
+
+    // Keep latest 40 notifications
+    this.db
+      .prepare(
+        `DELETE FROM activity_log WHERE id NOT IN (
+           SELECT id FROM activity_log ORDER BY created_at DESC LIMIT 40
+         )`
+      )
+      .run();
+
+    return {
+      id: Number(info.lastInsertRowid),
+      kind,
+      title,
+      detail,
+      createdAt: now,
+      isRead: false,
+    };
+  }
+
+  public listActivity(limit = 20): ActivityRecord[] {
+    const rows = this.db
+      .prepare("SELECT * FROM activity_log ORDER BY created_at DESC LIMIT ?")
+      .all(Math.min(Math.max(1, limit), 40)) as Row[];
+
+    return rows.map((r) => ({
+      id: Number(r.id),
+      kind: String(r.kind) as ActivityRecord["kind"],
+      title: String(r.title),
+      detail: String(r.detail ?? ""),
+      createdAt: Number(r.created_at ?? 0),
+      isRead: Number(r.is_read ?? 0) === 1,
+    }));
+  }
+
+  public markAllActivityRead(): void {
+    this.db.prepare("UPDATE activity_log SET is_read = 1 WHERE is_read = 0").run();
+  }
+
+  // ---- Demo Showcase Seeder ----
+
+  public seedDemoLibrary(payload: DemoSeedPayload): { trackersCount: number; tracksCount: number; playlistsCount: number } {
+    let tracksCount = 0;
+    for (const item of payload.trackers) {
+      this.upsertSyncedTracker(item.tracker, item.tracks);
+      tracksCount += item.tracks.length;
+    }
+
+    for (const id of payload.likedTrackIds) {
+      this.toggleLikeTrack(id, true);
+    }
+
+    for (const id of payload.followedTrackerIds) {
+      this.toggleFollowTracker(id, true);
+    }
+
+    const existingPlaylists = new Set(this.listPlaylists().map((p) => p.name.toLowerCase()));
+    let playlistsCreated = 0;
+    for (const pl of payload.playlists) {
+      if (existingPlaylists.has(pl.name.toLowerCase())) continue;
+      const created = this.createPlaylist({
+        name: pl.name,
+        description: pl.description,
+        coverGradient: pl.coverGradient,
+      });
+      for (const tid of pl.trackIds) {
+        this.addTrackToPlaylist(created.id, tid);
+      }
+      playlistsCreated++;
+    }
+
+    if (this.listRecentSearches(1).length === 0) {
+      for (const rs of [...payload.recentSearches].reverse()) {
+        this.addRecentSearch(rs);
+      }
+    }
+
+    // Seed a couple of initial plays so Top Hits / Recently Played feel alive right away
+    if (this.getTotalPlaysCount() === 0) {
+      this.recordPlay("demo_trk_07");
+      this.recordPlay("demo_trk_03");
+      this.recordPlay("demo_trk_01");
+      this.recordPlay("demo_trk_01");
+    }
+
+    this.addActivity(
+      "sync",
+      "Studio Demo Vault loaded",
+      `${payload.trackers.length} artists, ${tracksCount} lossless WAV masters, and ${playlistsCreated} curated playlists ready.`
+    );
+
+    return {
+      trackersCount: payload.trackers.length,
+      tracksCount,
+      playlistsCount: playlistsCreated,
+    };
+  }
+
+  // ---- Cache Entries ----
 
   public getCacheEntry(cacheKey: string): CacheEntry | null {
     const row = this.db
@@ -693,6 +1306,8 @@ export class AppDatabase {
     this.db.prepare("DELETE FROM cache_entries WHERE cache_key = ?").run(cacheKey);
   }
 
+  // ---- Row Mappers ----
+
   private mapTrackerRow(r: Row): TrackerRecord {
     return {
       trackerId: String(r.tracker_id),
@@ -705,6 +1320,8 @@ export class AppDatabase {
       playableCount: Number(r.playable_count ?? 0),
       credits: typeof r.credits === "string" ? r.credits : null,
       lastSyncedAt: Number(r.last_synced_at ?? 0),
+      isFollowed: Number(r.is_followed ?? 0) === 1,
+      coverImage: typeof r.cover_image === "string" ? r.cover_image : null,
     };
   }
 
@@ -752,6 +1369,8 @@ export class AppDatabase {
               lastAccessedAt: Number(r.ce_last_accessed_at ?? 0),
             }
           : null,
+      isLiked: Number(r.is_liked ?? 0) === 1,
+      playCount: Number(r.play_count ?? 0),
     };
   }
 
