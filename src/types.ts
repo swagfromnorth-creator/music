@@ -71,6 +71,8 @@ export interface TrackRecord {
     isComplete: boolean;
     lastAccessedAt: number;
   } | null;
+  isLiked?: boolean;
+  playCount?: number;
 }
 
 export interface TrackerTabMeta {
@@ -90,6 +92,8 @@ export interface TrackerRecord {
   playableCount: number;
   credits: string | null;
   lastSyncedAt: number;
+  isFollowed?: boolean;
+  coverImage?: string | null;
 }
 
 export interface SyncResult {
@@ -189,4 +193,55 @@ export interface CacheStats {
   partialCount: number;
   utilizationPercent: number;
   entries: CacheEntry[];
+}
+
+export interface UserProfile {
+  name: string;
+  handle: string;
+  bio: string;
+  avatarPreset: string;
+  avatarUrl: string | null;
+  accentColor: string;
+}
+
+export interface PlaylistRecord {
+  id: string;
+  name: string;
+  description: string;
+  coverGradient: string;
+  coverImage: string | null;
+  trackCount: number;
+  previewImages: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PlaylistDetail extends PlaylistRecord {
+  tracks: TrackRecord[];
+}
+
+export interface RecentSearchRecord {
+  id: number;
+  query: string;
+  itemType: "query" | "track" | "artist" | "era" | "playlist";
+  itemId: string | null;
+  subtitle: string | null;
+  imageUrl: string | null;
+  searchedAt: number;
+}
+
+export interface PlayHistoryItem {
+  id: number;
+  trackId: string;
+  playedAt: number;
+  track: TrackRecord;
+}
+
+export interface ActivityRecord {
+  id: number;
+  kind: "sync" | "cache" | "playlist" | "like" | "info";
+  title: string;
+  detail: string;
+  createdAt: number;
+  isRead: boolean;
 }

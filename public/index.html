@@ -4,34 +4,44 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="referrer" content="no-referrer" />
-    <title>VaultStream — Lossless Tracker Player</title>
+    <title>VaultStream — Lossless Music Streaming</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <div class="app-shell">
       <div class="app-body">
-        <!-- Minimal Left Sidebar -->
-        <aside class="sidebar">
-          <div class="sidebar-brand">
-            <span class="brand-name">VaultStream</span>
+        <!-- Left Navigation Sidebar (Audio X Charcoal Style) -->
+        <aside class="sidebar" id="sidebar">
+          <div class="sidebar-top">
+            <button type="button" class="sidebar-brand" id="brandHomeBtn" title="Go to Home">
+              <span class="brand-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none">
+                  <rect x="2" y="10" width="3" height="8" rx="1.5" fill="currentColor" opacity="0.65" />
+                  <rect x="7.5" y="5" width="3" height="14" rx="1.5" fill="currentColor" />
+                  <rect x="13" y="2" width="3" height="20" rx="1.5" fill="var(--accent)" />
+                  <rect x="18.5" y="7" width="3" height="11" rx="1.5" fill="currentColor" opacity="0.85" />
+                </svg>
+              </span>
+              <span class="brand-name">VaultStream</span>
+            </button>
           </div>
 
-          <nav class="sidebar-nav" aria-label="Primary">
+          <nav class="sidebar-nav" aria-label="Primary navigation">
             <button type="button" class="nav-item active" data-view="home">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M3 10.5L12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z" />
+              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5.5v-6.5h-5V21H4a1 1 0 0 1-1-1z" />
               </svg>
               <span>Home</span>
             </button>
             <button type="button" class="nav-item" data-view="search">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="11" cy="11" r="7" />
                 <path d="m20 20-3.5-3.5" />
               </svg>
               <span>Search</span>
             </button>
             <button type="button" class="nav-item" data-view="library">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
                 <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
               </svg>
@@ -40,216 +50,797 @@
           </nav>
 
           <div class="sidebar-group">
-            <button type="button" id="navSyncBtn" class="nav-item">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <button type="button" id="navNewPlaylistBtn" class="nav-item">
+              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="3" y="3" width="18" height="18" rx="4" />
                 <path d="M12 8v8M8 12h8" />
               </svg>
+              <span>New playlist</span>
+            </button>
+            <button type="button" class="nav-item" data-view="liked">
+              <svg class="nav-icon" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 20.4c-.3 0-.6-.1-.8-.3C6.2 15.8 3 12.8 3 8.9 3 6.1 5.2 4 7.9 4c1.6 0 3.1.8 4.1 2.1C13 4.8 14.5 4 16.1 4 18.8 4 21 6.1 21 8.9c0 3.9-3.2 6.9-8.2 11.2-.2.2-.5.3-.8.3z" />
+              </svg>
+              <span>Liked songs</span>
+              <span id="sidebarLikedCount" class="nav-pill-count hidden">0</span>
+            </button>
+            <button type="button" id="navSyncBtn" class="nav-item">
+              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                <path d="M3 3v5h5" />
+                <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+                <path d="M16 16h5v5" />
+              </svg>
               <span>Add tracker</span>
-            </button>
-            <button type="button" class="nav-item" data-view="lossless">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 20V10M18 20V4M6 20v-4" />
-              </svg>
-              <span>Lossless vault</span>
-            </button>
-            <button type="button" class="nav-item" data-view="cached">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 3v12m0 0-4-4m4 4 4-4" />
-                <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
-              </svg>
-              <span>Cached offline</span>
             </button>
           </div>
 
+          <div id="sidebarPlaylistsWrap" class="sidebar-playlists hidden">
+            <div class="sidebar-section-label">Playlists</div>
+            <div id="sidebarPlaylistsList" class="sidebar-playlists-list"></div>
+          </div>
+
           <div class="sidebar-footer">
-            <button type="button" id="navCacheBtn" class="nav-item">
-              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <button type="button" id="navSettingsBtn" class="nav-item">
+              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="3" />
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.79 1 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
               </svg>
-              <span>Settings &amp; cache</span>
+              <span>Settings</span>
+            </button>
+            <button type="button" id="sidebarCacheSummary" class="cache-footer-pill" title="Manage Smart LRU Disk Cache">
+              <span class="cache-dot"></span>
+              <span id="sidebarCacheLabel">0 B cached</span>
             </button>
           </div>
         </aside>
 
-        <!-- Pure-Black Main Stage -->
-        <main class="main-stage">
-          <!-- Top Search & Compact Actions -->
-          <header class="stage-header">
-            <div class="search-pill">
-              <svg class="search-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="11" cy="11" r="7" />
-                <path d="m20 20-3.5-3.5" />
-              </svg>
-              <input
-                id="searchInput"
-                type="search"
-                placeholder="Search tracks, eras, notes, producers... [/]"
-                autocomplete="off"
-              />
-              <span id="queryTimingBadge" class="timing-hint hidden"></span>
-            </div>
-
-            <div class="header-actions">
-              <select id="trackerSelect" class="tracker-switcher hidden" aria-label="Active tracker"></select>
-              <button type="button" id="headerSyncBtn" class="circle-btn" title="Sync or browse ArtistGrid trackers">
-                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M12 5v14M5 12h14" />
+        <!-- Pure Black Main Stage -->
+        <main class="main-stage" id="mainStage">
+          <!-- Floating / Sticky Header -->
+          <header class="stage-header" id="stageHeader">
+            <div class="header-left">
+              <button type="button" id="mobileMenuBtn" class="nav-circle-btn mobile-only" aria-label="Toggle menu">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                  <path d="M4 7h16M4 12h16M4 17h16" />
                 </svg>
               </button>
-              <button type="button" id="headerCacheBtn" class="cache-badge-btn" title="LRU Disk Cache">
-                <span class="cache-dot"></span>
-                <span id="headerCacheLabel">0 MB</span>
+              <div class="history-arrows">
+                <button type="button" id="navBackBtn" class="nav-circle-btn" title="Back" disabled>
+                  <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="m15 18-6-6 6-6" />
+                  </svg>
+                </button>
+                <button type="button" id="navForwardBtn" class="nav-circle-btn" title="Forward" disabled>
+                  <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="m9 18 6-6-6-6" />
+                  </svg>
+                </button>
+              </div>
+
+              <div class="search-pill" id="globalSearchWrap">
+                <svg class="search-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="11" cy="11" r="7" />
+                  <path d="m20 20-3.5-3.5" />
+                </svg>
+                <input
+                  id="searchInput"
+                  type="text"
+                  placeholder="Search songs, artists, eras, producers..."
+                  autocomplete="off"
+                />
+                <span id="queryTimingBadge" class="timing-hint hidden"></span>
+                <button type="button" id="clearSearchInputBtn" class="search-clear-x hidden" aria-label="Clear search">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+                    <path d="M18 6 6 18M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            <div class="header-right">
+              <button type="button" id="notifBellBtn" class="nav-circle-btn bell-btn" title="Activity & Notifications">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor">
+                  <path d="M12 22a2.2 2.2 0 0 0 2.1-1.6h-4.2A2.2 2.2 0 0 0 12 22zm6.4-5.4-1.2-1.2V10a5.2 5.2 0 0 0-4-5.05V4.2a1.2 1.2 0 0 0-2.4 0v.75A5.2 5.2 0 0 0 6.8 10v5.4l-1.2 1.2A1 1 0 0 0 6.3 18.3h11.4a1 1 0 0 0 .7-1.7z" />
+                </svg>
+                <span id="notifUnreadDot" class="notif-dot hidden"></span>
+              </button>
+
+              <button type="button" id="profileAvatarBtn" class="avatar-btn" title="Open Profile">
+                <span id="headerAvatarInner" class="avatar-inner">L</span>
               </button>
             </div>
           </header>
 
+          <!-- Floating Status Toast -->
           <div id="statusToast" class="status-toast hidden" role="status"></div>
 
-          <!-- Scrollable Content Canvas -->
+          <!-- Scrollable View Canvas -->
           <div class="stage-scroll" id="stageScroll">
-            <!-- HOME VIEW -->
+            <!-- 1. HOME VIEW -->
             <section id="homeView" class="view-section">
-              <div id="homeEmptyHero" class="hero-empty hidden">
-                <h1>Welcome to VaultStream</h1>
-                <p>Sync any ArtistGrid unreleased tracker to index lossless tracks in SQLite FTS5 and stream with smart byte-range caching.</p>
-                <button type="button" id="heroAddTrackerBtn" class="btn btn-white">Sync your first tracker</button>
+              <div id="homeEmptyHero" class="empty-stage hidden">
+                <div class="empty-glow" aria-hidden="true"></div>
+                <div class="empty-badge">Lossless Unreleased Archive · FTS5 · Smart LRU Cache</div>
+                <h1>Your music vault,<br />reimagined.</h1>
+                <p>
+                  Sync any ArtistGrid tracker for instant full-text search, direct lossless streaming, custom playlists,
+                  5-band EQ, and smart progressive offline caching.
+                </p>
+                <div class="empty-cta-row">
+                  <button type="button" id="heroAddTrackerBtn" class="btn btn-accent btn-lg">
+                    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
+                    <span>Sync ArtistGrid tracker</span>
+                  </button>
+                  <button type="button" id="heroSeedDemoBtn" class="btn btn-glass btn-lg">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                      <path d="M8 5.14v13.72a1 1 0 0 0 1.53.85l11-6.86a1 1 0 0 0 0-1.7l-11-6.86A1 1 0 0 0 8 5.14z" />
+                    </svg>
+                    <span>Try interactive studio demo</span>
+                  </button>
+                </div>
+
+                <div class="empty-feature-grid">
+                  <div class="empty-feature-card">
+                    <div class="feature-dot violet"></div>
+                    <div class="feature-title">Instant FTS5 Search</div>
+                    <div class="feature-desc">Find tracks by era, producer credits, notes, or lossless codec in milliseconds.</div>
+                  </div>
+                  <div class="empty-feature-card">
+                    <div class="feature-dot mint"></div>
+                    <div class="feature-title">Bit-Perfect Range Cache</div>
+                    <div class="feature-desc">206 byte-range scrubbing with automatic FLAC &amp; WAV header telemetry and LRU cap.</div>
+                  </div>
+                  <div class="empty-feature-card">
+                    <div class="feature-dot rose"></div>
+                    <div class="feature-title">Full Streaming Suite</div>
+                    <div class="feature-desc">Custom playlists, liked vault, play queue, 5-band Web Audio EQ, and cinema mode.</div>
+                  </div>
+                </div>
               </div>
 
               <div id="homeContent" class="hidden">
-                <div class="section-row">
-                  <h2 id="homeTracksHeading">Featured tracks</h2>
-                  <button type="button" id="homeSeeAllBtn" class="pill-action-btn">See all</button>
+                <div class="home-greeting-bar">
+                  <div>
+                    <h1 id="homeGreetingTitle" class="page-display-title">Good evening</h1>
+                  </div>
+                  <div class="home-quick-actions">
+                    <button type="button" id="homeSyncBtn" class="pill-btn">+ Add tracker</button>
+                  </div>
                 </div>
-                <div id="homeTrackList" class="clean-list"></div>
 
-                <div class="section-row" style="margin-top: 30px">
-                  <h2 id="homeErasHeading">Browse by era</h2>
-                  <span id="homeEraCount" class="muted small"></span>
+                <!-- Spotify-style 2x3 Quick Access Shelf -->
+                <div id="quickAccessGrid" class="quick-access-grid"></div>
+
+                <!-- Artists / Synced Trackers Shelf -->
+                <div id="homeArtistsBlock" class="content-block hidden">
+                  <div class="section-row">
+                    <h2>Your artists</h2>
+                    <button type="button" id="homeSeeLibraryBtn" class="link-pill">Show all</button>
+                  </div>
+                  <div id="homeArtistsRow" class="artist-shelf"></div>
                 </div>
-                <div id="eraCardsGrid" class="era-grid"></div>
+
+                <!-- Recently Played Horizontal Cards -->
+                <div id="homeRecentBlock" class="content-block hidden">
+                  <div class="section-row">
+                    <h2>Jump back in</h2>
+                    <button type="button" id="homeSeeHistoryBtn" class="link-pill">History</button>
+                  </div>
+                  <div id="homeRecentShelf" class="card-shelf"></div>
+                </div>
+
+                <!-- Quick Stream Clean Track List -->
+                <div class="content-block">
+                  <div class="section-row">
+                    <h2 id="homeTracksHeading">Quick stream</h2>
+                    <button type="button" id="homeSeeAllBtn" class="link-pill">See all</button>
+                  </div>
+                  <div id="homeTrackList" class="clean-list"></div>
+                </div>
+
+                <!-- Browse by Era Visual Mix Cards (Audio X Image 2 Grid) -->
+                <div class="content-block">
+                  <div class="section-row">
+                    <h2 id="homeErasHeading">Browse by era</h2>
+                    <span id="homeEraCount" class="muted small"></span>
+                  </div>
+                  <div id="eraCardsGrid" class="mix-grid"></div>
+                </div>
               </div>
             </section>
 
-            <!-- SEARCH / TRACKS / LOSSLESS / CACHED LIST VIEW -->
-            <section id="listView" class="view-section hidden">
-              <div class="list-header">
-                <div>
-                  <h2 id="listHeading">Search</h2>
-                  <div id="listSubheading" class="muted small"></div>
+            <!-- 2. SEARCH VIEW (Audio X Image 2 Inspired) -->
+            <section id="searchView" class="view-section hidden">
+              <!-- Empty Query Discovery State -->
+              <div id="searchDiscoverWrap">
+                <div id="recentSearchesBlock" class="content-block hidden">
+                  <div class="section-row">
+                    <h2>Recent searches</h2>
+                    <button type="button" id="clearRecentSearchesBtn" class="pill-btn">Clear</button>
+                  </div>
+                  <div id="recentSearchesList" class="clean-list"></div>
                 </div>
-                <div class="filter-pills">
-                  <select id="tabSelect" class="compact-select hidden" aria-label="Tracker tab"></select>
-                  <select id="eraSelect" class="compact-select" aria-label="Era filter">
-                    <option value="">All eras</option>
-                  </select>
-                  <select id="hostSelect" class="compact-select" aria-label="Host filter">
-                    <option value="">All hosts</option>
-                  </select>
-                  <button type="button" id="losslessFilterBtn" class="chip-btn">Lossless</button>
-                  <button type="button" id="playableFilterBtn" class="chip-btn active">Playable</button>
-                  <button type="button" id="clearFiltersBtn" class="pill-action-btn hidden">Clear</button>
+
+                <div class="content-block">
+                  <div class="section-row">
+                    <h2>Based on what you like</h2>
+                  </div>
+                  <div id="searchMixGrid" class="mix-grid"></div>
                 </div>
               </div>
 
-              <div id="searchTrackList" class="clean-list"></div>
+              <!-- Active Search / Filtered Results State -->
+              <div id="searchResultsWrap" class="hidden">
+                <div class="list-header">
+                  <div>
+                    <h2 id="searchResultsHeading">Results</h2>
+                    <div id="searchResultsSub" class="muted small"></div>
+                  </div>
+                  <div class="filter-pills">
+                    <select id="trackerSelect" class="compact-select hidden" aria-label="Filter by artist"></select>
+                    <select id="tabSelect" class="compact-select hidden" aria-label="Tracker tab"></select>
+                    <select id="eraSelect" class="compact-select" aria-label="Era filter">
+                      <option value="">All eras</option>
+                    </select>
+                    <select id="hostSelect" class="compact-select" aria-label="Host filter">
+                      <option value="">All hosts</option>
+                    </select>
+                    <button type="button" id="losslessFilterBtn" class="chip-btn">Lossless</button>
+                    <button type="button" id="playableFilterBtn" class="chip-btn active">Playable</button>
+                    <button type="button" id="clearFiltersBtn" class="pill-btn hidden">Clear</button>
+                  </div>
+                </div>
 
-              <div id="listEmptyState" class="empty-inline hidden">
-                No matching tracks found. Try clearing filters or syncing another tab.
-              </div>
+                <div id="searchTopResultWrap" class="top-result-wrap hidden"></div>
 
-              <div id="paginationBar" class="pagination-bar hidden">
-                <button type="button" id="prevPageBtn" class="pill-action-btn">Previous</button>
-                <span id="pageIndicator" class="muted small mono"></span>
-                <button type="button" id="nextPageBtn" class="pill-action-btn">Next</button>
+                <div id="searchTrackList" class="clean-list"></div>
+
+                <div id="listEmptyState" class="empty-inline hidden">
+                  No matching tracks found. Try clearing filters or searching another keyword.
+                </div>
+
+                <div id="paginationBar" class="pagination-bar hidden">
+                  <button type="button" id="prevPageBtn" class="pill-btn">Previous</button>
+                  <span id="pageIndicator" class="muted small mono"></span>
+                  <button type="button" id="nextPageBtn" class="pill-btn">Next</button>
+                </div>
               </div>
             </section>
 
-            <!-- LIBRARY VIEW -->
+            <!-- 3. ARTIST / TRACKER HERO VIEW (Audio X Image 3 Inspired) -->
+            <section id="artistView" class="view-section view-fullbleed hidden">
+              <div class="artist-hero" id="artistHero">
+                <div class="artist-hero-bg" id="artistHeroBg"></div>
+                <div class="artist-hero-scrim"></div>
+                <div class="artist-hero-content">
+                  <div class="artist-hero-left">
+                    <div class="verified-tag">
+                      <svg viewBox="0 0 24 24" width="15" height="15" fill="var(--accent)">
+                        <path d="M12 2 14.9 4.2l3.6-.3 1.1 3.4 3 2-1.1 3.4 1.1 3.4-3 2-1.1 3.4-3.6-.3L12 22l-2.9-2.2-3.6.3-1.1-3.4-3-2 1.1-3.4-1.1-3.4 3-2 1.1-3.4 3.6.3L12 2zm-1.1 13.7 5.5-5.5-1.4-1.4-4.1 4.1-1.9-1.9-1.4 1.4 3.3 3.3z" />
+                      </svg>
+                      <span>ArtistGrid Archive</span>
+                    </div>
+                    <h1 id="artistHeroName" class="artist-display-name">Artist</h1>
+                    <div id="artistHeroMeta" class="artist-stats-line">0 tracks</div>
+                    <div class="artist-action-row">
+                      <button type="button" id="artistFollowBtn" class="hero-icon-btn" title="Follow artist">
+                        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M12 20.4c-.3 0-.6-.1-.8-.3C6.2 15.8 3 12.8 3 8.9 3 6.1 5.2 4 7.9 4c1.6 0 3.1.8 4.1 2.1C13 4.8 14.5 4 16.1 4 18.8 4 21 6.1 21 8.9c0 3.9-3.2 6.9-8.2 11.2-.2.2-.5.3-.8.3z" />
+                        </svg>
+                      </button>
+                      <button type="button" id="artistMoreBtn" class="hero-icon-btn" title="More artist options">
+                        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+                          <circle cx="5" cy="12" r="1.8" />
+                          <circle cx="12" cy="12" r="1.8" />
+                          <circle cx="19" cy="12" r="1.8" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  <div class="artist-hero-right">
+                    <button type="button" id="artistShuffleBtn" class="hero-shuffle-btn" title="Shuffle artist">
+                      <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5" />
+                      </svg>
+                    </button>
+                    <button type="button" id="artistPlayBtn" class="hero-play-fab" title="Play artist">
+                      <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+                        <path d="M8 5.14v13.72a1 1 0 0 0 1.53.85l11-6.86a1 1 0 0 0 0-1.7l-11-6.86A1 1 0 0 0 8 5.14z" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="artist-body">
+                <div id="artistTabsRow" class="artist-tabs-row hidden"></div>
+
+                <div class="content-block">
+                  <div class="section-row">
+                    <h2>Top Hits</h2>
+                    <button type="button" id="artistToggleMoreHitsBtn" class="link-pill hidden">See more</button>
+                  </div>
+                  <div id="artistTopHitsList" class="clean-list"></div>
+                </div>
+
+                <div id="artistFeaturingBlock" class="content-block hidden">
+                  <div class="section-row">
+                    <h2>Featuring</h2>
+                  </div>
+                  <div id="artistFeaturingList" class="clean-list"></div>
+                </div>
+
+                <div class="content-block">
+                  <div class="section-row">
+                    <h2>Eras &amp; Sessions</h2>
+                    <span id="artistErasCount" class="muted small"></span>
+                  </div>
+                  <div id="artistErasGrid" class="mix-grid"></div>
+                </div>
+              </div>
+            </section>
+
+            <!-- 4. PROFILE VIEW (Audio X Image 1 Inspired) -->
+            <section id="profileView" class="view-section hidden">
+              <div class="profile-hero">
+                <div id="profileBigAvatar" class="profile-big-avatar">L</div>
+                <div class="profile-hero-meta">
+                  <div class="profile-name-row">
+                    <h1 id="profileDisplayName" class="profile-name">Listener</h1>
+                    <button type="button" id="editProfileBtn" class="pill-btn">Edit profile</button>
+                  </div>
+                  <div id="profileStatsLine" class="profile-stats-line">0 Liked • 0 Playlists • 0 Trackers</div>
+                  <div id="profileBioLine" class="profile-bio muted small"></div>
+                </div>
+              </div>
+
+              <div class="underline-tabs" id="profileTabs" role="tablist">
+                <button type="button" class="underline-tab active" data-profile-tab="playlists">Playlists</button>
+                <button type="button" class="underline-tab" data-profile-tab="downloaded">Downloaded</button>
+                <button type="button" class="underline-tab" data-profile-tab="liked">Liked</button>
+                <button type="button" class="underline-tab" data-profile-tab="history">Recently played</button>
+              </div>
+
+              <div id="profileTabContent" class="clean-list profile-tab-body"></div>
+            </section>
+
+            <!-- 5. MY LIBRARY VIEW -->
             <section id="libraryView" class="view-section hidden">
               <div class="section-row">
-                <h2>Synced trackers</h2>
-                <button type="button" id="libSyncBtn" class="pill-action-btn">+ Add tracker</button>
+                <h1 class="page-display-title">My library</h1>
+                <div style="display:flex; gap:8px">
+                  <button type="button" id="libNewPlaylistBtn" class="pill-btn">+ New playlist</button>
+                  <button type="button" id="libSyncBtn" class="btn btn-accent btn-sm">+ Add tracker</button>
+                </div>
               </div>
-              <div id="libraryTrackersGrid" class="library-grid"></div>
 
-              <div class="section-row" style="margin-top: 32px">
-                <h2>Tabs in active tracker</h2>
+              <div class="underline-tabs" id="libraryTabs" role="tablist">
+                <button type="button" class="underline-tab active" data-lib-tab="artists">Artists &amp; Trackers</button>
+                <button type="button" class="underline-tab" data-lib-tab="playlists">Playlists</button>
+                <button type="button" class="underline-tab" data-lib-tab="lossless">Lossless Vault</button>
+                <button type="button" class="underline-tab" data-lib-tab="downloaded">Downloaded</button>
               </div>
-              <div id="libraryTabsWrap" class="tabs-grid"></div>
+
+              <div id="libraryTabBody" class="library-tab-body"></div>
+            </section>
+
+            <!-- 6. COLLECTION DETAIL VIEW (Liked Songs / Playlist / Era / Smart Mix) -->
+            <section id="collectionView" class="view-section view-fullbleed hidden">
+              <div class="collection-hero" id="collectionHero">
+                <div class="collection-hero-bg" id="collectionHeroBg"></div>
+                <div class="collection-hero-scrim"></div>
+                <div class="collection-hero-content">
+                  <div id="collectionArtwork" class="collection-art"></div>
+                  <div class="collection-meta">
+                    <div id="collectionEyebrow" class="collection-eyebrow">PLAYLIST</div>
+                    <h1 id="collectionTitle" class="collection-title">Collection</h1>
+                    <p id="collectionDesc" class="collection-desc"></p>
+                    <div id="collectionStats" class="collection-stats muted small"></div>
+                  </div>
+                  <div class="collection-cta-group">
+                    <button type="button" id="collectionShuffleBtn" class="hero-shuffle-btn" title="Shuffle">
+                      <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5" />
+                      </svg>
+                    </button>
+                    <button type="button" id="collectionPlayBtn" class="hero-play-fab" title="Play all">
+                      <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+                        <path d="M8 5.14v13.72a1 1 0 0 0 1.53.85l11-6.86a1 1 0 0 0 0-1.7l-11-6.86A1 1 0 0 0 8 5.14z" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="collection-body">
+                <div class="collection-toolbar">
+                  <div class="collection-inline-search">
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                      <circle cx="11" cy="11" r="7" />
+                      <path d="m20 20-3.5-3.5" />
+                    </svg>
+                    <input id="collectionFilterInput" type="text" placeholder="Filter in this collection..." />
+                  </div>
+                  <div id="collectionExtraActions" class="collection-extra-actions"></div>
+                </div>
+
+                <div id="collectionTrackList" class="clean-list"></div>
+                <div id="collectionEmpty" class="empty-inline hidden">No tracks in this collection yet.</div>
+              </div>
             </section>
           </div>
         </main>
       </div>
 
-      <!-- Sticky Minimal Bottom Audio Player -->
-      <footer class="player-bar">
-        <div class="player-now" id="playerNowTrigger" title="Click to open Track Inspector">
-          <div id="playerArt" class="player-art">♫</div>
+      <!-- Sticky Modern Audio Player Bar -->
+      <footer class="player-bar" id="playerBar">
+        <div class="player-left">
+          <button type="button" id="playerArtTrigger" class="player-art" title="Open Fullscreen Now Playing">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M9 18V5l12-2v13" />
+              <circle cx="6" cy="18" r="3" />
+              <circle cx="18" cy="16" r="3" />
+            </svg>
+          </button>
           <div class="player-meta">
-            <div id="playerTitle" class="player-title">Not playing</div>
-            <div id="playerSubtitle" class="player-sub">Select a track to stream</div>
+            <button type="button" id="playerTitle" class="player-title-btn">Not playing</button>
+            <button type="button" id="playerSubtitle" class="player-sub-btn">Select a track to stream</button>
           </div>
+          <button type="button" id="playerLikeBtn" class="icon-btn like-btn hidden" title="Like song">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 20.4c-.3 0-.6-.1-.8-.3C6.2 15.8 3 12.8 3 8.9 3 6.1 5.2 4 7.9 4c1.6 0 3.1.8 4.1 2.1C13 4.8 14.5 4 16.1 4 18.8 4 21 6.1 21 8.9c0 3.9-3.2 6.9-8.2 11.2-.2.2-.5.3-.8.3z" />
+            </svg>
+          </button>
         </div>
 
         <div class="player-center">
           <div class="transport-row">
+            <button type="button" id="shuffleBtn" class="icon-btn" title="Shuffle">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5" />
+              </svg>
+            </button>
             <button type="button" id="prevTrackBtn" class="icon-btn" title="Previous" disabled>
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
                 <path d="M6 6h2v12H6zm3.5 6 8.5 6V6z" />
               </svg>
             </button>
             <button type="button" id="playPauseBtn" class="play-circle-btn" title="Play / Pause [Space]" disabled>
-              ▶
+              <svg id="playPauseSvg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                <path d="M8 5.14v13.72a1 1 0 0 0 1.53.85l11-6.86a1 1 0 0 0 0-1.7l-11-6.86A1 1 0 0 0 8 5.14z" />
+              </svg>
             </button>
             <button type="button" id="nextTrackBtn" class="icon-btn" title="Next" disabled>
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
                 <path d="M16 6h2v12h-2zM6 18l8.5-6L6 6z" />
               </svg>
             </button>
+            <button type="button" id="repeatBtn" class="icon-btn" title="Repeat: Off">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m17 2 4 4-4 4" />
+                <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+                <path d="m7 22-4-4 4-4" />
+                <path d="M21 13v1a4 4 0 0 1-4 4H3" />
+              </svg>
+              <span id="repeatOneTag" class="repeat-one-tag hidden">1</span>
+            </button>
           </div>
+
           <div class="seek-row">
             <span id="currentTimeLabel" class="time-label mono">0:00</span>
-            <input id="seekSlider" type="range" min="0" max="1000" value="0" disabled />
+            <div class="custom-scrubber" id="seekBar" role="slider" aria-label="Seek audio" tabindex="0">
+              <div class="scrubber-track">
+                <div id="seekBufferFill" class="scrubber-buffered" style="width: 0%"></div>
+                <div id="seekProgressFill" class="scrubber-fill" style="width: 0%"></div>
+                <div id="seekThumb" class="scrubber-thumb" style="left: 0%"></div>
+              </div>
+            </div>
             <span id="durationLabel" class="time-label mono">0:00</span>
           </div>
         </div>
 
         <div class="player-right">
-          <span id="playerCodecBadge" class="stream-pill">Idle</span>
-          <button type="button" id="playerInspectBtn" class="icon-btn hidden" title="Inspect track">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+          <button type="button" id="playerCodecBadge" class="stream-pill" title="Audio Quality &amp; Track Inspector">Idle</button>
+
+          <button type="button" id="eqToggleBtn" class="icon-btn" title="Equalizer &amp; Speed">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" />
+            </svg>
+          </button>
+
+          <button type="button" id="queueToggleBtn" class="icon-btn" title="Up Next Queue">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <path d="M4 6h16M4 12h10M4 18h10" />
+              <path d="m18 14 4 2.5-4 2.5z" fill="currentColor" stroke="none" />
+            </svg>
+          </button>
+
+          <button type="button" id="playerInspectBtn" class="icon-btn hidden" title="Track Inspector &amp; Notes">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <circle cx="12" cy="12" r="9" />
               <path d="M12 16v-4M12 8h.01" />
             </svg>
           </button>
+
           <div class="volume-wrap">
-            <button type="button" id="muteBtn" class="icon-btn" title="Mute">🔊</button>
-            <input id="volumeSlider" type="range" min="0" max="1" step="0.02" value="0.9" />
+            <button type="button" id="muteBtn" class="icon-btn" title="Mute / Unmute">
+              <svg id="volumeSvg" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+              </svg>
+            </button>
+            <div class="custom-scrubber volume-scrubber" id="volumeBar" role="slider" aria-label="Volume" tabindex="0">
+              <div class="scrubber-track">
+                <div id="volumeFill" class="scrubber-fill" style="width: 90%"></div>
+                <div id="volumeThumb" class="scrubber-thumb" style="left: 90%"></div>
+              </div>
+            </div>
           </div>
+
+          <button type="button" id="fullscreenToggleBtn" class="icon-btn" title="Now Playing Fullscreen">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+            </svg>
+          </button>
         </div>
 
         <audio id="audioEl" preload="metadata"></audio>
       </footer>
     </div>
 
-    <!-- Fixed Slide-Over Track Inspector Drawer (works at every viewport size) -->
-    <div id="inspectorBackdrop" class="drawer-backdrop hidden"></div>
-    <aside id="inspectorDrawer" class="inspector-drawer" aria-label="Track Inspector" aria-hidden="true">
+    <!-- Mobile Sidebar Backdrop -->
+    <div id="mobileSidebarBackdrop" class="drawer-backdrop hidden"></div>
+
+    <!-- Notification Bell Popover -->
+    <div id="notifPopover" class="floating-popover notif-popover hidden" role="dialog" aria-label="Notifications">
+      <div class="popover-header">
+        <span>Activity</span>
+        <button type="button" id="markAllReadBtn" class="link-pill">Mark all read</button>
+      </div>
+      <div id="notifList" class="notif-list"></div>
+    </div>
+
+    <!-- Equalizer & Playback Speed Popover -->
+    <div id="eqPopover" class="floating-popover eq-popover hidden" role="dialog" aria-label="Audio Equalizer">
+      <div class="popover-header">
+        <span>Sound &amp; Equalizer</span>
+        <span id="eqStatusBadge" class="soft-tag">Flat</span>
+      </div>
+      <div class="eq-presets-row" id="eqPresetsRow">
+        <button type="button" class="chip-btn active" data-eq-preset="flat">Flat</button>
+        <button type="button" class="chip-btn" data-eq-preset="bass">Bass Boost</button>
+        <button type="button" class="chip-btn" data-eq-preset="vocal">Vocal</button>
+        <button type="button" class="chip-btn" data-eq-preset="electronic">Club</button>
+        <button type="button" class="chip-btn" data-eq-preset="latenight">Late Night</button>
+      </div>
+      <div class="eq-sliders-grid" id="eqSlidersGrid"></div>
+      <div class="eq-divider"></div>
+      <div class="eq-sub-row">
+        <span class="muted small">Playback Speed</span>
+        <div class="speed-pills" id="speedPills">
+          <button type="button" class="chip-btn" data-speed="0.75">0.75×</button>
+          <button type="button" class="chip-btn active" data-speed="1">1.0×</button>
+          <button type="button" class="chip-btn" data-speed="1.25">1.25×</button>
+          <button type="button" class="chip-btn" data-speed="1.5">1.5×</button>
+        </div>
+      </div>
+      <div class="eq-sub-row">
+        <span class="muted small">Sleep Timer</span>
+        <div class="speed-pills" id="sleepPills">
+          <button type="button" class="chip-btn active" data-sleep="0">Off</button>
+          <button type="button" class="chip-btn" data-sleep="15">15m</button>
+          <button type="button" class="chip-btn" data-sleep="30">30m</button>
+          <button type="button" class="chip-btn" data-sleep="60">60m</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Track Context Menu Popover -->
+    <div id="trackContextMenu" class="context-menu hidden" role="menu"></div>
+
+    <!-- Slide-Over Drawer Backdrop -->
+    <div id="drawerBackdrop" class="drawer-backdrop hidden"></div>
+
+    <!-- Up Next Queue Drawer -->
+    <aside id="queueDrawer" class="side-drawer" aria-label="Up Next Queue" aria-hidden="true">
+      <div class="drawer-header">
+        <span>Up Next</span>
+        <div style="display:flex; gap:8px; align-items:center">
+          <button type="button" id="clearQueueBtn" class="pill-btn">Clear</button>
+          <button type="button" id="closeQueueBtn" class="nav-circle-btn" aria-label="Close queue">✕</button>
+        </div>
+      </div>
+      <div id="queueContent" class="drawer-content"></div>
+    </aside>
+
+    <!-- Track Inspector Drawer -->
+    <aside id="inspectorDrawer" class="side-drawer" aria-label="Track Inspector" aria-hidden="true">
       <div class="drawer-header">
         <span>Track Inspector</span>
-        <button type="button" id="closeInspectorBtn" class="circle-btn" aria-label="Close inspector">✕</button>
+        <button type="button" id="closeInspectorBtn" class="nav-circle-btn" aria-label="Close inspector">✕</button>
       </div>
       <div id="inspectorContent" class="drawer-content"></div>
     </aside>
 
-    <!-- Add Tracker & Directory Modal -->
+    <!-- Fullscreen Now Playing Cinema Overlay -->
+    <div id="fullscreenPlayer" class="fullscreen-overlay hidden" role="dialog" aria-modal="true" aria-label="Now Playing">
+      <div id="fsBackdrop" class="fs-backdrop"></div>
+      <div class="fs-scrim"></div>
+      <div class="fs-shell">
+        <div class="fs-topbar">
+          <button type="button" id="closeFullscreenBtn" class="nav-circle-btn" title="Exit Fullscreen [Esc]">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round">
+              <path d="m6 9 6 6 6-6" />
+            </svg>
+          </button>
+          <div class="fs-source-label">
+            <div class="fs-eyebrow">NOW PLAYING</div>
+            <div id="fsSourceText" class="fs-source-name">VaultStream Lossless</div>
+          </div>
+          <div class="fs-panel-tabs">
+            <button type="button" class="chip-btn active" data-fs-tab="notes">Notes &amp; Specs</button>
+            <button type="button" class="chip-btn" data-fs-tab="queue">Up Next</button>
+          </div>
+        </div>
+
+        <div class="fs-main">
+          <div class="fs-stage-left">
+            <div id="fsCoverWrap" class="fs-cover"></div>
+            <canvas id="fsVisualizerCanvas" class="fs-visualizer" width="420" height="54"></canvas>
+            <div class="fs-track-meta">
+              <div>
+                <h2 id="fsTitle">Not playing</h2>
+                <div id="fsArtist" class="muted">Select a track</div>
+              </div>
+              <button type="button" id="fsLikeBtn" class="hero-icon-btn" title="Like song">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 20.4c-.3 0-.6-.1-.8-.3C6.2 15.8 3 12.8 3 8.9 3 6.1 5.2 4 7.9 4c1.6 0 3.1.8 4.1 2.1C13 4.8 14.5 4 16.1 4 18.8 4 21 6.1 21 8.9c0 3.9-3.2 6.9-8.2 11.2-.2.2-.5.3-.8.3z" />
+                </svg>
+              </button>
+            </div>
+            <div class="fs-scrubber-wrap">
+              <div class="custom-scrubber fs-scrubber" id="fsSeekBar" role="slider" tabindex="0">
+                <div class="scrubber-track">
+                  <div id="fsSeekFill" class="scrubber-fill" style="width: 0%"></div>
+                  <div id="fsSeekThumb" class="scrubber-thumb" style="left: 0%"></div>
+                </div>
+              </div>
+              <div class="fs-time-row mono">
+                <span id="fsCurrentTime">0:00</span>
+                <span id="fsCodecPill" class="soft-tag lossless">Lossless</span>
+                <span id="fsDuration">0:00</span>
+              </div>
+            </div>
+            <div class="fs-transport">
+              <button type="button" id="fsShuffleBtn" class="icon-btn" title="Shuffle">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                  <path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5" />
+                </svg>
+              </button>
+              <button type="button" id="fsPrevBtn" class="icon-btn" title="Previous">
+                <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor">
+                  <path d="M6 6h2v12H6zm3.5 6 8.5 6V6z" />
+                </svg>
+              </button>
+              <button type="button" id="fsPlayPauseBtn" class="hero-play-fab fs-play-fab" title="Play / Pause">
+                <svg id="fsPlayPauseSvg" viewBox="0 0 24 24" width="26" height="26" fill="currentColor">
+                  <path d="M8 5.14v13.72a1 1 0 0 0 1.53.85l11-6.86a1 1 0 0 0 0-1.7l-11-6.86A1 1 0 0 0 8 5.14z" />
+                </svg>
+              </button>
+              <button type="button" id="fsNextBtn" class="icon-btn" title="Next">
+                <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor">
+                  <path d="M16 6h2v12h-2zM6 18l8.5-6L6 6z" />
+                </svg>
+              </button>
+              <button type="button" id="fsRepeatBtn" class="icon-btn" title="Repeat">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                  <path d="m17 2 4 4-4 4" />
+                  <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+                  <path d="m7 22-4-4 4-4" />
+                  <path d="M21 13v1a4 4 0 0 1-4 4H3" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div id="fsSidePanel" class="fs-stage-right"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Create / Edit Playlist -->
+    <div id="playlistModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+      <div class="modal-card modal-sm">
+        <div class="modal-header">
+          <h3 id="playlistModalTitle">Create playlist</h3>
+          <button type="button" id="closePlaylistModalBtn" class="nav-circle-btn">✕</button>
+        </div>
+        <form id="playlistForm" class="modal-body">
+          <label class="field-label">
+            <span>Name</span>
+            <input id="playlistNameInput" type="text" placeholder="e.g. Late Night Lossless" required maxlength="100" />
+          </label>
+          <label class="field-label">
+            <span>Description</span>
+            <textarea id="playlistDescInput" rows="3" placeholder="Add an optional description..." maxlength="300"></textarea>
+          </label>
+          <div>
+            <div class="field-caption">Cover Gradient</div>
+            <div id="playlistGradientPicker" class="swatch-row"></div>
+          </div>
+          <div class="modal-footer-actions">
+            <button type="button" id="cancelPlaylistModalBtn" class="btn btn-ghost">Cancel</button>
+            <button type="submit" id="savePlaylistBtn" class="btn btn-accent">Save playlist</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: Add Track to Playlist Picker -->
+    <div id="addToPlaylistModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+      <div class="modal-card modal-sm">
+        <div class="modal-header">
+          <h3>Add to playlist</h3>
+          <button type="button" id="closeAddToPlModalBtn" class="nav-circle-btn">✕</button>
+        </div>
+        <div class="modal-body">
+          <div id="addToPlTrackPreview" class="muted small"></div>
+          <div id="addToPlList" class="clean-list"></div>
+          <button type="button" id="addToPlCreateNewBtn" class="btn btn-ghost" style="width:100%">+ Create new playlist</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Edit Profile -->
+    <div id="profileModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+      <div class="modal-card modal-sm">
+        <div class="modal-header">
+          <h3>Edit profile</h3>
+          <button type="button" id="closeProfileModalBtn" class="nav-circle-btn">✕</button>
+        </div>
+        <form id="profileForm" class="modal-body">
+          <label class="field-label">
+            <span>Display name</span>
+            <input id="profileNameInput" type="text" required maxlength="60" />
+          </label>
+          <label class="field-label">
+            <span>Handle</span>
+            <input id="profileHandleInput" type="text" placeholder="@vaultstream" maxlength="40" />
+          </label>
+          <label class="field-label">
+            <span>Bio</span>
+            <textarea id="profileBioInput" rows="2" maxlength="200" placeholder="Tell us about your taste..."></textarea>
+          </label>
+          <label class="field-label">
+            <span>Custom avatar image URL (optional)</span>
+            <input id="profileAvatarUrlInput" type="url" placeholder="https://..." />
+          </label>
+          <div>
+            <div class="field-caption">Avatar Style</div>
+            <div id="avatarPresetPicker" class="swatch-row"></div>
+          </div>
+          <div>
+            <div class="field-caption">Accent Color</div>
+            <div id="accentColorPicker" class="swatch-row"></div>
+          </div>
+          <div class="modal-footer-actions">
+            <button type="button" id="cancelProfileModalBtn" class="btn btn-ghost">Cancel</button>
+            <button type="submit" class="btn btn-accent">Save changes</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: Add ArtistGrid Tracker & Directory -->
     <div id="syncModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
       <div class="modal-card">
         <div class="modal-header">
           <h3>Add ArtistGrid Tracker</h3>
-          <button type="button" id="closeSyncModalBtn" class="circle-btn">✕</button>
+          <button type="button" id="closeSyncModalBtn" class="nav-circle-btn">✕</button>
         </div>
         <div class="modal-body">
           <form id="syncForm" class="sync-form">
@@ -260,10 +851,18 @@
               autocomplete="off"
               spellcheck="false"
             />
-            <button type="submit" id="syncBtn" class="btn btn-white">Sync</button>
+            <button type="submit" id="syncBtn" class="btn btn-accent">Sync</button>
           </form>
 
-          <div class="divider-label">Or choose from ArtistGrid directory</div>
+          <div class="demo-banner-row">
+            <div>
+              <div style="font-weight:600; font-size:13px">Want to preview offline?</div>
+              <div class="muted small">Load 2 studio artists, 10 lossless WAV tracks, and curated playlists locally.</div>
+            </div>
+            <button type="button" id="modalSeedDemoBtn" class="pill-btn">Load demo</button>
+          </div>
+
+          <div class="divider-label">Or browse ArtistGrid directory</div>
 
           <input
             id="directorySearchInput"
@@ -275,12 +874,12 @@
       </div>
     </div>
 
-    <!-- Settings & Smart LRU Cache Modal -->
+    <!-- Modal: Settings & Smart LRU Cache -->
     <div id="cacheModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
       <div class="modal-card modal-wide">
         <div class="modal-header">
           <h3>Settings &amp; Smart LRU Disk Cache</h3>
-          <button type="button" id="closeCacheBtn" class="circle-btn">✕</button>
+          <button type="button" id="closeCacheBtn" class="nav-circle-btn">✕</button>
         </div>
         <div class="modal-body">
           <div class="cache-stats-row">
@@ -304,16 +903,16 @@
 
           <div class="cap-row">
             <span class="muted small">Max Cache Cap:</span>
-            <button type="button" class="pill-action-btn cap-preset" data-mb="50">50 MB</button>
-            <button type="button" class="pill-action-btn cap-preset" data-mb="250">250 MB</button>
-            <button type="button" class="pill-action-btn cap-preset" data-mb="1024">1 GB</button>
-            <button type="button" class="pill-action-btn cap-preset" data-mb="2048">2 GB</button>
-            <button type="button" class="pill-action-btn cap-preset" data-mb="5120">5 GB</button>
+            <button type="button" class="pill-btn cap-preset" data-mb="50">50 MB</button>
+            <button type="button" class="pill-btn cap-preset" data-mb="250">250 MB</button>
+            <button type="button" class="pill-btn cap-preset" data-mb="1024">1 GB</button>
+            <button type="button" class="pill-btn cap-preset" data-mb="2048">2 GB</button>
+            <button type="button" class="pill-btn cap-preset" data-mb="5120">5 GB</button>
             <form id="customCapForm" class="inline-cap-form">
               <input id="customCapMbInput" type="number" min="1" step="1" placeholder="MB" />
-              <button type="submit" class="pill-action-btn">Apply</button>
+              <button type="submit" class="pill-btn">Apply</button>
             </form>
-            <button type="button" id="clearAllCacheBtn" class="pill-action-btn danger-pill">Clear all</button>
+            <button type="button" id="clearAllCacheBtn" class="pill-btn danger-pill">Clear all</button>
           </div>
 
           <div id="cacheEntriesList" class="clean-list cache-entries-list"></div>
@@ -325,9 +924,9 @@
                 <div id="updateStatusText" class="small muted">Checking GitHub...</div>
               </div>
               <div style="display:flex; gap:8px">
-                <button type="button" id="checkUpdateBtn" class="pill-action-btn">Check</button>
-                <button type="button" id="applyUpdateBtn" class="btn btn-white hidden" style="padding:6px 14px; font-size:12px">Pull &amp; Update</button>
-                <button type="button" id="restartAppBtn" class="pill-action-btn hidden">Restart Server</button>
+                <button type="button" id="checkUpdateBtn" class="pill-btn">Check</button>
+                <button type="button" id="applyUpdateBtn" class="btn btn-accent hidden" style="padding:6px 14px; font-size:12px">Pull &amp; Update</button>
+                <button type="button" id="restartAppBtn" class="pill-btn hidden">Restart Server</button>
               </div>
             </div>
           </div>
@@ -341,7 +940,7 @@
                 placeholder="https://pixeldrain.com/u/... or https://pillows.su/f/..."
                 required
               />
-              <button type="submit" class="btn btn-white">Resolve</button>
+              <button type="submit" class="btn btn-accent">Resolve</button>
             </form>
             <pre id="testResolveOutput" class="code-preview hidden"></pre>
           </details>
