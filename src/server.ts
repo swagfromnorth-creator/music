@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import dns from "node:dns";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -14,10 +15,21 @@ import { CACHE_DIR, DATA_DIR, DB_PATH, HOST, PORT } from "./config.ts";
 import { AppDatabase } from "./db.ts";
 import { buildDemoSeedPayload, createDemoAudioResponse, renderDemoArtSvg } from "./demo.ts";
 import { ImageProxyCache } from "./images.ts";
-import { resolveHostUrl, type FetchLike } from "./resolver.ts";
+import { LOCAL_LIBRARY_TRACKER_ID, scanLocalMusicFolder } from "./local-library.ts";
+import {
+  formatDurationSeconds,
+  searchOnlineMedia,
+  streamTranscodedAudio,
+} from "./media-tools.ts";
+import {
+  cleanMessyTrackTitle,
+  lookupMusicBrainzMetadata,
+  parseSpotifyPlaylistInput,
+} from "./musicbrainz.ts";
+import { detectHost, resolveHostUrl, type FetchLike } from "./resolver.ts";
 import { fetchArtTabCovers, fetchDirectoryArtists, fetchTrackerFromArtistGrid } from "./tracker.ts";
 import { applyGitUpdate, checkForUpdates, getCurrentCommit } from "./updater.ts";
-import type { DirectoryArtist, HostResolution, SyncResult, TrackRecord, UserProfile } from "./types.ts";
+import type { DirectoryArtist, HostKind, HostResolution, SyncResult, TrackRecord, UserProfile } from "./types.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(__dirname, "..", "public");
@@ -56,6 +68,111 @@ async function readJsonBody<T = Record<string, unknown>>(req: IncomingMessage): 
   const text = Buffer.concat(chunks).toString("utf8").trim();
   if (!text) return {} as T;
   return JSON.parse(text) as T;
+}
+
+function fileUrlToLocalPath(urlOrPath: string): string {
+  if (!/^file:\/\//i.test(urlOrPath)) return urlOrPath;
+  const stripped = urlOrPath.replace(/^file:\/\//i, "");
+  if (process.platform === "win32" && /^\/[a-zA-Z]:/.test(stripped)) {
+    return stripped.slice(1);
+  }
+  return stripped;
+}
+
+function normalizeMatchText(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isStrongLocalTrackMatch(candidate: TrackRecord, targetTitle: string, targetArtist: string): boolean {
+  const cTitle = normalizeMatchText(candidate.title);
+  const tTitle = normalizeMatchText(targetTitle);
+  if (!cTitle || !tTitle) return false;
+  const titleMatch = cTitle === tTitle || cTitle.includes(tTitle) || tTitle.includes(cTitle);
+  if (!titleMatch) return false;
+  const tArtist = normalizeMatchText(targetArtist);
+  if (!tArtist || tArtist === "unknown artist") return true;
+  const cArtist = normalizeMatchText(`${candidate.artist} ${candidate.credits}`);
+  return tArtist
+    .split(" ")
+    .some((tok) => tok.length >= 2 && cArtist.includes(tok));
+}
+
+function buildImportedTrackRecord(input: {
+  idPrefix: string;
+  trackerId: string;
+  tabName: string;
+  sourceUrl: string;
+  title: string;
+  artist: string;
+  album: string | null;
+  thumbnail: string | null;
+  durationSec: number | null;
+  year: string | null;
+  host: HostKind;
+  notes?: string;
+  resolved?: HostResolution;
+  trackOrder?: number;
+}): TrackRecord {
+  const cleanUrl = input.sourceUrl.trim();
+  const id =
+    input.idPrefix +
+    crypto.createHash("sha256").update(cleanUrl).digest("hex").slice(0, 16);
+  const resolvedOk = input.resolved && input.resolved.ok ? input.resolved : null;
+  const inferredExt =
+    resolvedOk?.formatHint ??
+    cleanUrl.split("?")[0]?.match(/\.([a-z0-9]{2,5})$/i)?.[1]?.toLowerCase() ??
+    null;
+
+  return {
+    id,
+    trackerId: input.trackerId,
+    tabName: input.tabName,
+    title: input.title,
+    rawName: input.title,
+    credits: "",
+    artist: input.artist || "Unknown Artist",
+    era: input.album || "Imported",
+    subEra: input.year || input.host,
+    eraOrder: 0,
+    trackOrder: input.trackOrder ?? 0,
+    eraColor: "#2563eb",
+    eraTextColor: "#ffffff",
+    eraImage: input.thumbnail,
+    notes: input.notes ?? `Imported from ${input.host}: ${cleanUrl}`,
+    quality:
+      inferredExt === "flac" || inferredExt === "wav" || inferredExt === "alac"
+        ? "Lossless"
+        : "High Quality",
+    formatHint: inferredExt,
+    trackLength: formatDurationSeconds(input.durationSec),
+    availableLength: null,
+    leakDate: input.year,
+    fileDate: null,
+    trackType: "Imported",
+    primaryUrl: cleanUrl,
+    primaryHost: input.host,
+    links: [
+      {
+        url: cleanUrl,
+        text: input.host,
+        host: input.host,
+        playable: true,
+        formatHint: inferredExt,
+      },
+    ],
+    resolvedUrl: resolvedOk?.resolvedUrl ?? null,
+    resolvedMime: resolvedOk?.mimeType ?? null,
+    resolvedSize: resolvedOk?.sizeBytes ?? null,
+    resolvedFilename: resolvedOk?.filename ?? null,
+    resolvedAt: resolvedOk ? Date.now() : null,
+    isPlayable: true,
+    audioMeta: null,
+  };
 }
 
 export interface AppContext {
@@ -100,6 +217,7 @@ export function createAppServer(options: {
   let lastAutoUpdateCheck = 0;
   let lastAutoUpdateError: string | null = null;
   let directoryCache: { fetchedAt: number; artists: DirectoryArtist[] } | null = null;
+  const resolvedHeadersCache = new Map<string, Record<string, string>>();
 
   async function resolveTrackLink(
     track: TrackRecord,
@@ -141,9 +259,30 @@ export function createAppServer(options: {
       };
     }
 
-    // Reuse fresh cached resolution if resolving primary link
+    if (firstCandidate.host === "local" || firstCandidate.url.startsWith("file://")) {
+      const localPath = track.resolvedUrl || fileUrlToLocalPath(firstCandidate.url);
+      return {
+        sourceUrl: firstCandidate.url,
+        resolution: {
+          ok: true,
+          sourceUrl: firstCandidate.url,
+          resolvedUrl: localPath,
+          host: "local",
+          mimeType: track.resolvedMime,
+          filename: track.resolvedFilename ?? path.basename(localPath),
+          sizeBytes: track.resolvedSize,
+          formatHint: track.formatHint,
+        },
+      };
+    }
+
+    // Reuse fresh cached resolution if resolving primary link (and headers exist when needed)
+    const needsFreshYtHeaders =
+      track.primaryHost === "youtube" &&
+      Boolean(track.primaryUrl && !resolvedHeadersCache.has(track.primaryUrl));
     if (
       !opts.forceRefresh &&
+      !needsFreshYtHeaders &&
       opts.linkIndex === undefined &&
       track.resolvedUrl &&
       track.primaryUrl &&
@@ -161,14 +300,23 @@ export function createAppServer(options: {
           filename: track.resolvedFilename,
           sizeBytes: track.resolvedSize,
           formatHint: track.formatHint,
+          httpHeaders: resolvedHeadersCache.get(track.primaryUrl),
         },
       };
     }
 
     let lastFailure: HostResolution | null = null;
     for (const link of candidateLinks) {
-      const resolved = await resolveHostUrl(link.url, rawFetchImpl);
+      let resolved = await resolveHostUrl(link.url, rawFetchImpl);
+      if (!resolved.ok && link.host === "soundcloud") {
+        resolved = await resolveHostUrl(link.url, rawFetchImpl, {
+          preferYtDlpForSoundcloud: true,
+        });
+      }
       if (resolved.ok) {
+        if (resolved.httpHeaders && Object.keys(resolved.httpHeaders).length > 0) {
+          resolvedHeadersCache.set(link.url, resolved.httpHeaders);
+        }
         if (link.url === track.primaryUrl || opts.linkIndex === undefined) {
           db.updateTrackResolution(track.id, {
             resolvedUrl: resolved.resolvedUrl,
@@ -176,6 +324,10 @@ export function createAppServer(options: {
             resolvedSize: resolved.sizeBytes,
             resolvedFilename: resolved.filename,
           });
+          if (!track.trackLength && resolved.durationSec) {
+            const lenStr = formatDurationSeconds(resolved.durationSec);
+            if (lenStr) db.updateTrackMetadata(track.id, { trackLength: lenStr });
+          }
         }
         return { sourceUrl: link.url, resolution: resolved };
       }
@@ -634,6 +786,7 @@ export function createAppServer(options: {
           sendJson(res, 404, { error: "Track not found" });
           return;
         }
+        const compat = parsedUrl.searchParams.get("compat") === "1";
         const linkIdxParam = parsedUrl.searchParams.get("linkIndex");
         const linkIndex = linkIdxParam !== null ? Number(linkIdxParam) : undefined;
         const { sourceUrl, resolution } = await resolveTrackLink(track, { linkIndex });
@@ -647,10 +800,41 @@ export function createAppServer(options: {
           return;
         }
 
+        if (resolution.host === "local") {
+          const localPath = fileUrlToLocalPath(resolution.resolvedUrl);
+          if (compat) {
+            await streamTranscodedAudio(localPath, res, {
+              lossless: Boolean(track.audioMeta?.lossless),
+            });
+          } else {
+            await cache.streamLocalFile(localPath, req, res, resolution.mimeType);
+          }
+          return;
+        }
+
+        if (compat) {
+          const cachedPath = await cache.getCompleteCachedFile(sourceUrl);
+          await streamTranscodedAudio(cachedPath ?? resolution.resolvedUrl, res, {
+            lossless: Boolean(track.audioMeta?.lossless),
+            httpHeaders: cachedPath ? undefined : resolution.httpHeaders,
+          });
+          return;
+        }
+
         await cache.streamWithCache(req, res, {
           trackId: track.id,
           sourceUrl,
           resolvedUrl: resolution.resolvedUrl,
+          upstreamHeaders: resolution.httpHeaders,
+          onExpiredUpstream: async () => {
+            const fresh = await resolveTrackLink(track, { linkIndex, forceRefresh: true });
+            return fresh.resolution.ok
+              ? {
+                  resolvedUrl: fresh.resolution.resolvedUrl,
+                  upstreamHeaders: fresh.resolution.httpHeaders,
+                }
+              : null;
+          },
         });
         return;
       }
@@ -661,6 +845,15 @@ export function createAppServer(options: {
         const track = db.getTrackById(trackCacheMatch[1]!);
         if (!track) {
           sendJson(res, 404, { error: "Track not found" });
+          return;
+        }
+        if (track.primaryHost === "local") {
+          sendJson(res, 200, {
+            entry: null,
+            track,
+            cache: cache.getStats(),
+            alreadyLocal: true,
+          });
           return;
         }
         const body = await readJsonBody<{ linkIndex?: number }>(req);
@@ -678,6 +871,7 @@ export function createAppServer(options: {
           trackId: track.id,
           sourceUrl,
           resolvedUrl: resolution.resolvedUrl,
+          upstreamHeaders: resolution.httpHeaders,
         });
         db.addActivity(
           "cache",
@@ -692,6 +886,337 @@ export function createAppServer(options: {
         return;
       }
 
+      // Serve locally extracted embedded album artwork (music-metadata)
+      const localArtMatch = pathname.match(/^\/api\/local-art\/([a-z0-9-]+)$/i);
+      if (method === "GET" && localArtMatch) {
+        const key = localArtMatch[1]!;
+        const binPath = path.join(imagesDir, `${key}.bin`);
+        const metaPath = path.join(imagesDir, `${key}.json`);
+        try {
+          const [data, metaRaw] = await Promise.all([
+            fsp.readFile(binPath),
+            fsp.readFile(metaPath, "utf8").catch(() => "{}"),
+          ]);
+          const meta = JSON.parse(metaRaw) as { contentType?: string };
+          res.writeHead(200, {
+            "Content-Type": meta.contentType || "image/jpeg",
+            "Content-Length": data.length,
+            "Cache-Control": "public, max-age=31536000, immutable",
+          });
+          res.end(data);
+        } catch {
+          sendJson(res, 404, { error: "Local artwork not found" });
+        }
+        return;
+      }
+
+      // Online media discovery via YouTube Music (youtubei.js), YouTube, and SoundCloud (yt-dlp)
+      if (method === "GET" && pathname === "/api/discover/search") {
+        const q = (parsedUrl.searchParams.get("q") ?? "").trim();
+        if (!q) {
+          sendJson(res, 400, { error: "Missing 'q' query parameter" });
+          return;
+        }
+        const rawSource = parsedUrl.searchParams.get("source") ?? "ytmusic";
+        const source =
+          rawSource === "youtube" || rawSource === "soundcloud" ? rawSource : "ytmusic";
+        const limit = Math.min(Math.max(1, Number(parsedUrl.searchParams.get("limit") ?? 12)), 20);
+        const results = await searchOnlineMedia(q, source, limit);
+        sendJson(res, 200, { query: q, source, results });
+        return;
+      }
+
+      // Import a YouTube / SoundCloud / Bandcamp / direct audio URL into the library
+      if (method === "POST" && pathname === "/api/discover/import-url") {
+        const body = await readJsonBody<{
+          url?: string;
+          title?: string;
+          artist?: string;
+          album?: string;
+          thumbnail?: string;
+          playlistId?: string;
+          enrichMusicBrainz?: boolean;
+        }>(req);
+        const targetUrl = body.url?.trim();
+        if (!targetUrl) {
+          sendJson(res, 400, { error: "Missing 'url'" });
+          return;
+        }
+
+        let resolved = await resolveHostUrl(targetUrl, rawFetchImpl, {
+          preferYtDlpForSoundcloud: true,
+        });
+        if (!resolved.ok) {
+          sendJson(res, 422, { error: resolved.errorMessage, errorCode: resolved.errorCode });
+          return;
+        }
+
+        if (resolved.httpHeaders && Object.keys(resolved.httpHeaders).length > 0) {
+          resolvedHeadersCache.set(targetUrl, resolved.httpHeaders);
+        }
+
+        const rawTitle = body.title?.trim() || resolved.title || resolved.filename || targetUrl;
+        const rawArtist = body.artist?.trim() || resolved.artist || "";
+        const cleaned = cleanMessyTrackTitle(rawTitle, rawArtist);
+
+        let title = cleaned.title || rawTitle;
+        let artist = cleaned.artist || rawArtist || "Unknown Artist";
+        let album = body.album?.trim() || resolved.album || null;
+        let thumbnail = body.thumbnail?.trim() || resolved.thumbnail || null;
+        let year: string | null = null;
+
+        if (body.enrichMusicBrainz !== false) {
+          const mb = await lookupMusicBrainzMetadata(title, artist, rawFetchImpl).catch(() => null);
+          if (mb) {
+            title = mb.title || title;
+            artist = mb.artist || artist;
+            album = mb.album || album;
+            year = mb.year || year;
+            if (mb.coverArtUrl) thumbnail = mb.coverArtUrl;
+          }
+        }
+
+        const trackRecord = buildImportedTrackRecord({
+          idPrefix: "imp_",
+          trackerId: "imported_web",
+          tabName: "Saved URLs",
+          sourceUrl: targetUrl,
+          title,
+          artist,
+          album,
+          thumbnail,
+          durationSec: resolved.durationSec ?? null,
+          year,
+          host: resolved.host,
+          resolved,
+        });
+
+        const saved = db.upsertImportedTrack(
+          {
+            trackerId: "imported_web",
+            name: "Imported Web Tracks",
+            artistName: "Web & Streaming",
+            tabName: "Saved URLs",
+          },
+          trackRecord
+        );
+
+        if (body.playlistId) {
+          db.addTrackToPlaylist(body.playlistId, saved.id);
+        }
+
+        db.addActivity("sync", `Imported "${saved.title}"`, `${saved.artist} · ${saved.primaryHost}`);
+        sendJson(res, 200, { track: saved, resolution: resolved });
+        return;
+      }
+
+      // MusicBrainz + Cover Art Archive metadata normalizer
+      if (method === "POST" && pathname === "/api/metadata/musicbrainz") {
+        const body = await readJsonBody<{
+          trackId?: string;
+          title?: string;
+          artist?: string;
+        }>(req);
+
+        const existingTrack = body.trackId ? db.getTrackById(body.trackId) : null;
+        if (body.trackId && !existingTrack) {
+          sendJson(res, 404, { error: "Track not found" });
+          return;
+        }
+
+        const lookupTitle = body.title?.trim() || existingTrack?.title || "";
+        const lookupArtist = body.artist?.trim() || existingTrack?.artist || "";
+        if (!lookupTitle) {
+          sendJson(res, 400, { error: "Provide 'trackId' or 'title'" });
+          return;
+        }
+
+        const match = await lookupMusicBrainzMetadata(lookupTitle, lookupArtist, rawFetchImpl);
+        if (!match) {
+          sendJson(res, 200, { matched: false, match: null, track: existingTrack });
+          return;
+        }
+
+        let updatedTrack = existingTrack;
+        if (existingTrack) {
+          updatedTrack = db.updateTrackMetadata(existingTrack.id, {
+            title: match.title,
+            artist: match.artist,
+            era: match.album ?? existingTrack.era,
+            eraImage: match.coverArtUrl ?? existingTrack.eraImage,
+            leakDate: match.year ?? existingTrack.leakDate,
+          });
+          db.addActivity(
+            "sync",
+            `Enriched "${match.title}" via MusicBrainz`,
+            `${match.artist}${match.album ? ` · ${match.album}` : ""}`
+          );
+        }
+
+        sendJson(res, 200, { matched: true, match, track: updatedTrack });
+        return;
+      }
+
+      // Scan a local music folder (MP3/FLAC/WAV/ALAC/M4A/OGG/OPUS) via music-metadata
+      if (method === "POST" && pathname === "/api/library/scan-local") {
+        const body = await readJsonBody<{ folderPath?: string }>(req);
+        const folderPath = body.folderPath?.trim();
+        if (!folderPath) {
+          sendJson(res, 400, { error: "Provide 'folderPath'" });
+          return;
+        }
+        const stats = await scanLocalMusicFolder(folderPath, db, imagesDir);
+        const tracker = db.getTracker(LOCAL_LIBRARY_TRACKER_ID);
+        db.addActivity(
+          "sync",
+          `Scanned local folder (${stats.indexedTracks} tracks)`,
+          `${folderPath} · ${stats.albumsCount} album(s)`
+        );
+        sendJson(res, 200, { ...stats, tracker });
+        return;
+      }
+
+      // Spotify CSV/JSON playlist migration into VaultStream library + playlist
+      if (method === "POST" && pathname === "/api/import/spotify") {
+        const body = await readJsonBody<{
+          content?: string;
+          playlistName?: string;
+          sourcePreference?: "ytmusic" | "youtube" | "soundcloud";
+          resolveOnline?: boolean;
+          createPlaylist?: boolean;
+        }>(req);
+
+        const rawContent = body.content?.trim();
+        if (!rawContent) {
+          sendJson(res, 400, { error: "Provide Spotify CSV, SpotDL JSON, or 'Artist - Track' text in 'content'." });
+          return;
+        }
+
+        const parsedItems = parseSpotifyPlaylistInput(rawContent);
+        if (parsedItems.length === 0) {
+          sendJson(res, 400, { error: "No tracks could be parsed from the provided playlist input." });
+          return;
+        }
+
+        const playlistName = (body.playlistName?.trim() || "Spotify Import").slice(0, 100);
+        const sourcePref =
+          body.sourcePreference === "youtube" || body.sourcePreference === "soundcloud"
+            ? body.sourcePreference
+            : "ytmusic";
+        const resolveOnline = body.resolveOnline !== false;
+        const maxTracks = parsedItems.slice(0, 100);
+
+        const matchedTrackIds: string[] = [];
+        const unmatched: Array<{ title: string; artist: string }> = [];
+        let matchedLocal = 0;
+        let matchedOnline = 0;
+
+        for (let idx = 0; idx < maxTracks.length; idx++) {
+          const item = maxTracks[idx]!;
+          const searchQ = `${item.title} ${item.artist !== "Unknown Artist" ? item.artist : ""}`.trim();
+          const localCandidates = db.searchTracks({ q: searchQ, playableOnly: true, limit: 8 }).tracks;
+          const localHit = localCandidates.find((c) => isStrongLocalTrackMatch(c, item.title, item.artist));
+
+          if (localHit) {
+            matchedTrackIds.push(localHit.id);
+            matchedLocal++;
+            continue;
+          }
+
+          if (!resolveOnline) {
+            unmatched.push({ title: item.title, artist: item.artist });
+            continue;
+          }
+
+          let chosenUrl =
+            item.externalUrl && detectHost(item.externalUrl) !== "unknown" ? item.externalUrl : null;
+          let host: HostKind = chosenUrl ? detectHost(chosenUrl) : "youtube";
+          let thumb = item.coverUrl;
+          let durSec = item.durationSec;
+
+          if (!chosenUrl) {
+            try {
+              const onlineHits = await searchOnlineMedia(
+                `${item.artist !== "Unknown Artist" ? `${item.artist} - ` : ""}${item.title}`,
+                sourcePref,
+                1
+              );
+              if (onlineHits[0]) {
+                chosenUrl = onlineHits[0].url;
+                host = sourcePref === "soundcloud" ? "soundcloud" : "youtube";
+                thumb = thumb || onlineHits[0].thumbnail;
+                durSec = durSec ?? onlineHits[0].durationSec;
+              }
+            } catch {
+              // treat as unmatched if search fails
+            }
+          }
+
+          if (!chosenUrl) {
+            unmatched.push({ title: item.title, artist: item.artist });
+            continue;
+          }
+
+          const imported = buildImportedTrackRecord({
+            idPrefix: "spf_",
+            trackerId: "spotify_imports",
+            tabName: playlistName,
+            sourceUrl: chosenUrl,
+            title: item.title,
+            artist: item.artist,
+            album: item.album,
+            thumbnail: thumb,
+            durationSec: durSec,
+            year: null,
+            host,
+            notes: `Migrated from Spotify playlist "${playlistName}"`,
+            trackOrder: idx,
+          });
+
+          const saved = db.upsertImportedTrack(
+            {
+              trackerId: "spotify_imports",
+              name: "Spotify Migrations",
+              artistName: "Spotify Imports",
+              tabName: playlistName,
+            },
+            imported
+          );
+          matchedTrackIds.push(saved.id);
+          matchedOnline++;
+        }
+
+        let playlist = null;
+        if (body.createPlaylist !== false) {
+          playlist = db.createPlaylist({
+            name: playlistName,
+            description: `Imported ${matchedTrackIds.length}/${parsedItems.length} tracks (${matchedLocal} local, ${matchedOnline} online)`,
+          });
+          for (const tid of matchedTrackIds) {
+            db.addTrackToPlaylist(playlist.id, tid);
+          }
+          playlist = db.getPlaylistDetail(playlist.id);
+        }
+
+        db.addActivity(
+          "playlist",
+          `Imported "${playlistName}"`,
+          `${matchedTrackIds.length}/${parsedItems.length} tracks matched (${matchedLocal} local, ${matchedOnline} online)`
+        );
+
+        sendJson(res, 200, {
+          playlist,
+          totalParsed: parsedItems.length,
+          processedCount: maxTracks.length,
+          tracksAdded: matchedTrackIds.length,
+          matchedLocal,
+          matchedOnline,
+          unmatchedCount: unmatched.length,
+          unmatched,
+        });
+        return;
+      }
+
       // Direct host link resolver utility
       if (method === "POST" && pathname === "/api/resolve") {
         const body = await readJsonBody<{ url?: string }>(req);
@@ -699,7 +1224,9 @@ export function createAppServer(options: {
           sendJson(res, 400, { error: "Missing 'url'" });
           return;
         }
-        const resolution = await resolveHostUrl(body.url, rawFetchImpl);
+        const resolution = await resolveHostUrl(body.url, rawFetchImpl, {
+          preferYtDlpForSoundcloud: true,
+        });
         sendJson(res, resolution.ok ? 200 : 422, resolution);
         return;
       }

@@ -1,7 +1,9 @@
 import { USER_AGENT } from "./config.ts";
+import { resolveWithYtDlp, type YtDlpExtraction } from "./media-tools.ts";
 import type { HostKind, HostResolution, TrackLink } from "./types.ts";
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
+export type YtDlpResolver = (url: string) => Promise<YtDlpExtraction>;
 
 const TIDAL_APIS = [
   "https://triton.squid.wtf",
@@ -24,10 +26,14 @@ const PLAYABLE_HOSTS = new Set<HostKind>([
   "qobuz",
   "juicewrld",
   "googledrive",
+  "youtube",
+  "bandcamp",
+  "local",
   "direct",
 ]);
 
 const HOST_PRIORITY: Record<HostKind, number> = {
+  local: 110,
   pillows: 100,
   pixeldrain: 95,
   froste: 90,
@@ -35,12 +41,13 @@ const HOST_PRIORITY: Record<HostKind, number> = {
   tidal: 85,
   qobuz: 85,
   juicewrld: 80,
+  bandcamp: 75,
   krakenfiles: 70,
   imgur: 65,
   googledrive: 55,
   soundcloud: 50,
   exoshare: 20,
-  youtube: 5,
+  youtube: 15,
   unknown: 1,
 };
 
@@ -50,11 +57,13 @@ export function normalizeHostUrl(rawUrl: string): string {
 
 export function detectHost(rawUrl: string): HostKind {
   const url = normalizeHostUrl(rawUrl).toLowerCase();
+  if (url.startsWith("file://")) return "local";
   if (/https?:\/\/(?:www\.)?pixeldrain\.com\/[du]\//.test(url)) return "pixeldrain";
   if (/https?:\/\/(?:www\.|api\.)?pillows\.su\/(?:f|api\/download)\//.test(url)) return "pillows";
   if (/https?:\/\/(?:www\.)?krakenfiles\.com\/view\//.test(url)) return "krakenfiles";
   if (/https?:\/\/music\.froste\.lol\/song\//.test(url)) return "froste";
   if (/https?:\/\/(?:www\.|m\.)?soundcloud\.com\/[^/]+\/[^/?#]+/.test(url)) return "soundcloud";
+  if (/https?:\/\/[^/]*bandcamp\.com\/track\//.test(url)) return "bandcamp";
   if (/https?:\/\/(?:www\.)?imgur\.gg\//.test(url)) return "imgur";
   if (/https?:\/\/(?:listen\.|www\.)?tidal\.com\/(?:browse\/)?track\//.test(url)) return "tidal";
   if (/https?:\/\/(?:play\.|open\.|www\.)?qobuz\.com\/(?:[^/]+\/)?track\//.test(url)) return "qobuz";
@@ -144,10 +153,12 @@ async function fetchWithTimeout(
 
 export async function resolveHostUrl(
   rawUrl: string,
-  fetchImpl: FetchLike = fetch
+  fetchImpl: FetchLike = fetch,
+  opts: { ytDlpResolver?: YtDlpResolver; preferYtDlpForSoundcloud?: boolean } = {}
 ): Promise<HostResolution> {
   const sourceUrl = normalizeHostUrl(rawUrl);
   const host = detectHost(sourceUrl);
+  const ytDlpResolve = opts.ytDlpResolver ?? resolveWithYtDlp;
 
   try {
     switch (host) {
@@ -404,6 +415,29 @@ export async function resolveHostUrl(
       }
 
       case "soundcloud": {
+        if (opts.preferYtDlpForSoundcloud) {
+          try {
+            const ext = await ytDlpResolve(sourceUrl);
+            return {
+              ok: true,
+              sourceUrl,
+              resolvedUrl: ext.streamUrl,
+              host,
+              mimeType: ext.ext === "m4a" ? "audio/mp4" : ext.ext === "opus" ? "audio/opus" : "audio/mpeg",
+              filename: ext.title ? `${ext.title}.${ext.ext ?? "mp3"}` : null,
+              sizeBytes: ext.filesize,
+              formatHint: ext.ext,
+              httpHeaders: ext.httpHeaders,
+              durationSec: ext.durationSec,
+              thumbnail: ext.thumbnail,
+              title: ext.title,
+              artist: ext.artist,
+              album: ext.album,
+            };
+          } catch {
+            // fall back to sc.maid.zone
+          }
+        }
         const match = sourceUrl.match(/soundcloud\.com\/([^/]+\/[^/?#]+)/i);
         const trackPath = match?.[1];
         if (!trackPath) {
@@ -559,14 +593,58 @@ export async function resolveHostUrl(
           formatHint: extractExtension(sourceUrl),
         };
 
-      case "youtube":
+      case "local":
         return {
-          ok: false,
+          ok: true,
           sourceUrl,
+          resolvedUrl: sourceUrl.replace(/^file:\/\//i, ""),
           host,
-          errorCode: "unsupported_youtube",
-          errorMessage: "YouTube links are reference-only and cannot be streamed as direct audio files.",
+          mimeType: null,
+          filename: null,
+          sizeBytes: null,
+          formatHint: extractExtension(sourceUrl),
         };
+
+      case "youtube":
+      case "bandcamp": {
+        try {
+          const ext = await ytDlpResolve(sourceUrl);
+          const mimeType =
+            ext.ext === "m4a"
+              ? "audio/mp4"
+              : ext.ext === "webm"
+                ? "audio/webm"
+                : ext.ext === "opus"
+                  ? "audio/opus"
+                  : ext.ext === "flac"
+                    ? "audio/flac"
+                    : "audio/mpeg";
+          return {
+            ok: true,
+            sourceUrl,
+            resolvedUrl: ext.streamUrl,
+            host,
+            mimeType,
+            filename: ext.title ? `${ext.title}.${ext.ext ?? "m4a"}` : null,
+            sizeBytes: ext.filesize,
+            formatHint: ext.ext,
+            httpHeaders: ext.httpHeaders,
+            durationSec: ext.durationSec,
+            thumbnail: ext.thumbnail,
+            title: ext.title,
+            artist: ext.artist,
+            album: ext.album,
+          };
+        } catch (err) {
+          return {
+            ok: false,
+            sourceUrl,
+            host,
+            errorCode: "ytdlp_failed",
+            errorMessage: err instanceof Error ? err.message : "yt-dlp extraction failed.",
+          };
+        }
+      }
 
       default:
         return {

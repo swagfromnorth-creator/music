@@ -633,6 +633,219 @@ export class AppDatabase {
     this.db.prepare(`UPDATE tracks SET ${sets.join(", ")} WHERE id = ?`).run(...params);
   }
 
+  public upsertImportedTrack(
+    trackerMeta: {
+      trackerId: string;
+      name: string;
+      artistName: string;
+      tabName?: string;
+      credits?: string | null;
+    },
+    track: TrackRecord
+  ): TrackRecord {
+    const now = Date.now();
+    const tabName = trackerMeta.tabName?.trim() || track.tabName || "Imported";
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existingTracker = this.db
+        .prepare("SELECT tabs_json, synced_tabs_json, current_tab FROM trackers WHERE tracker_id = ?")
+        .get(trackerMeta.trackerId) as Row | undefined;
+
+      const existingTabs = existingTracker
+        ? safeJsonParse<TrackerTabMeta[]>(existingTracker.tabs_json, [])
+        : [];
+      const tabSlug = tabName.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      const tabs: TrackerTabMeta[] = existingTabs.some((t) => t.name === tabName)
+        ? existingTabs
+        : [...existingTabs, { name: tabName, slug: tabSlug || "imported", gid: "" }];
+      const syncedTabs = existingTracker
+        ? Array.from(new Set([...safeJsonParse<string[]>(existingTracker.synced_tabs_json, []), tabName]))
+        : [tabName];
+
+      this.db
+        .prepare(
+          `INSERT INTO trackers (
+            tracker_id, name, artist_name, current_tab, tabs_json, synced_tabs_json,
+            track_count, playable_count, credits, last_synced_at
+          ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+          ON CONFLICT(tracker_id) DO UPDATE SET
+            tabs_json = excluded.tabs_json,
+            synced_tabs_json = excluded.synced_tabs_json,
+            last_synced_at = excluded.last_synced_at`
+        )
+        .run(
+          trackerMeta.trackerId,
+          trackerMeta.name,
+          trackerMeta.artistName,
+          String(existingTracker?.current_tab ?? tabName),
+          JSON.stringify(tabs),
+          JSON.stringify(syncedTabs),
+          trackerMeta.credits ?? null,
+          now
+        );
+
+      this.db
+        .prepare(
+          `INSERT INTO tracks (
+            id, tracker_id, tab_name, title, raw_name, credits, artist,
+            era, sub_era, era_order, track_order, era_color, era_text_color, era_image,
+            notes, quality, format_hint, track_length, available_length, leak_date, file_date, track_type,
+            primary_url, primary_host, links_json,
+            resolved_url, resolved_mime, resolved_size, resolved_filename, resolved_at,
+            is_playable, audio_meta_json
+          ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            ?, ?
+          )
+          ON CONFLICT(id) DO UPDATE SET
+            tab_name = excluded.tab_name,
+            title = excluded.title,
+            raw_name = excluded.raw_name,
+            credits = COALESCE(excluded.credits, tracks.credits),
+            artist = excluded.artist,
+            era = excluded.era,
+            era_image = COALESCE(excluded.era_image, tracks.era_image),
+            notes = CASE WHEN excluded.notes != '' THEN excluded.notes ELSE tracks.notes END,
+            quality = CASE WHEN excluded.quality != '' THEN excluded.quality ELSE tracks.quality END,
+            format_hint = COALESCE(excluded.format_hint, tracks.format_hint),
+            track_length = COALESCE(excluded.track_length, tracks.track_length),
+            leak_date = COALESCE(excluded.leak_date, tracks.leak_date),
+            primary_url = excluded.primary_url,
+            primary_host = excluded.primary_host,
+            links_json = excluded.links_json,
+            resolved_url = COALESCE(excluded.resolved_url, tracks.resolved_url),
+            resolved_mime = COALESCE(excluded.resolved_mime, tracks.resolved_mime),
+            resolved_size = COALESCE(excluded.resolved_size, tracks.resolved_size),
+            resolved_filename = COALESCE(excluded.resolved_filename, tracks.resolved_filename),
+            resolved_at = COALESCE(excluded.resolved_at, tracks.resolved_at),
+            is_playable = excluded.is_playable,
+            audio_meta_json = COALESCE(excluded.audio_meta_json, tracks.audio_meta_json)`
+        )
+        .run(
+          track.id,
+          trackerMeta.trackerId,
+          tabName,
+          track.title,
+          track.rawName,
+          track.credits,
+          track.artist,
+          track.era,
+          track.subEra,
+          track.eraOrder,
+          track.trackOrder,
+          track.eraColor,
+          track.eraTextColor,
+          track.eraImage,
+          track.notes,
+          track.quality,
+          track.formatHint,
+          track.trackLength,
+          track.availableLength,
+          track.leakDate,
+          track.fileDate,
+          track.trackType,
+          track.primaryUrl,
+          track.primaryHost,
+          JSON.stringify(track.links),
+          track.resolvedUrl,
+          track.resolvedMime,
+          track.resolvedSize,
+          track.resolvedFilename,
+          track.resolvedAt,
+          track.isPlayable ? 1 : 0,
+          track.audioMeta ? JSON.stringify(track.audioMeta) : null
+        );
+
+      const totals = this.db
+        .prepare(
+          `SELECT COUNT(*) AS total_count, COALESCE(SUM(is_playable), 0) AS playable_count
+           FROM tracks WHERE tracker_id = ?`
+        )
+        .get(trackerMeta.trackerId) as Row;
+
+      this.db
+        .prepare("UPDATE trackers SET track_count = ?, playable_count = ?, last_synced_at = ? WHERE tracker_id = ?")
+        .run(
+          Number(totals.total_count ?? 1),
+          Number(totals.playable_count ?? (track.isPlayable ? 1 : 0)),
+          now,
+          trackerMeta.trackerId
+        );
+
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+
+    return this.getTrackById(track.id) ?? track;
+  }
+
+  public updateTrackMetadata(
+    id: string,
+    patch: {
+      title?: string;
+      artist?: string;
+      era?: string;
+      eraImage?: string | null;
+      notes?: string;
+      leakDate?: string | null;
+      trackLength?: string | null;
+      quality?: string;
+      formatHint?: string | null;
+    }
+  ): TrackRecord | null {
+    const sets: string[] = [];
+    const params: Array<string | number | null> = [];
+
+    if (patch.title !== undefined && patch.title.trim()) {
+      sets.push("title = ?");
+      params.push(patch.title.trim());
+    }
+    if (patch.artist !== undefined && patch.artist.trim()) {
+      sets.push("artist = ?");
+      params.push(patch.artist.trim());
+    }
+    if (patch.era !== undefined) {
+      sets.push("era = ?");
+      params.push(patch.era.trim() || "Unknown");
+    }
+    if (patch.eraImage !== undefined) {
+      sets.push("era_image = ?");
+      params.push(patch.eraImage);
+    }
+    if (patch.notes !== undefined) {
+      sets.push("notes = ?");
+      params.push(patch.notes);
+    }
+    if (patch.leakDate !== undefined) {
+      sets.push("leak_date = ?");
+      params.push(patch.leakDate);
+    }
+    if (patch.trackLength !== undefined) {
+      sets.push("track_length = ?");
+      params.push(patch.trackLength);
+    }
+    if (patch.quality !== undefined) {
+      sets.push("quality = ?");
+      params.push(patch.quality);
+    }
+    if (patch.formatHint !== undefined) {
+      sets.push("format_hint = ?");
+      params.push(patch.formatHint);
+    }
+
+    if (sets.length > 0) {
+      params.push(id);
+      this.db.prepare(`UPDATE tracks SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+    }
+    return this.getTrackById(id);
+  }
+
   public searchTracks(params: SearchParams): SearchResult {
     const started = performance.now();
     const limit = Math.min(Math.max(1, params.limit ?? 150), 500);

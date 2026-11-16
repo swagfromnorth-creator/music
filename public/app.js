@@ -111,6 +111,9 @@ const state = {
   homeTracks: [],
   homeEras: [],
   searchQuery: "",
+  searchSource: "library", // "library" | "ytmusic" | "youtube" | "soundcloud"
+  onlineResults: [],
+  onlineSearchReqSeq: 0,
   searchTrackerId: "",
   searchTabName: "",
   searchEra: "",
@@ -224,6 +227,8 @@ const el = {
   eraCardsGrid: $("eraCardsGrid"),
 
   searchView: $("searchView"),
+  searchSourceTabs: $("searchSourceTabs"),
+  localFilterPills: $("localFilterPills"),
   searchDiscoverWrap: $("searchDiscoverWrap"),
   recentSearchesBlock: $("recentSearchesBlock"),
   clearRecentSearchesBtn: $("clearRecentSearchesBtn"),
@@ -396,12 +401,32 @@ const el = {
 
   syncModal: $("syncModal"),
   closeSyncModalBtn: $("closeSyncModalBtn"),
+  syncModalTabs: $("syncModalTabs"),
+  syncTabArtistGrid: $("syncTabArtistGrid"),
+  syncTabUrl: $("syncTabUrl"),
+  syncTabLocal: $("syncTabLocal"),
+  syncTabSpotify: $("syncTabSpotify"),
   syncForm: $("syncForm"),
   trackerInput: $("trackerInput"),
   syncBtn: $("syncBtn"),
   modalSeedDemoBtn: $("modalSeedDemoBtn"),
   directorySearchInput: $("directorySearchInput"),
   directoryList: $("directoryList"),
+  importUrlForm: $("importUrlForm"),
+  importUrlInput: $("importUrlInput"),
+  importUrlMbCheck: $("importUrlMbCheck"),
+  importUrlBtn: $("importUrlBtn"),
+  localScanForm: $("localScanForm"),
+  localFolderInput: $("localFolderInput"),
+  localScanStatus: $("localScanStatus"),
+  localScanBtn: $("localScanBtn"),
+  spotifyImportForm: $("spotifyImportForm"),
+  spotifyPlaylistNameInput: $("spotifyPlaylistNameInput"),
+  spotifySourceSelect: $("spotifySourceSelect"),
+  spotifyFileInput: $("spotifyFileInput"),
+  spotifyContentInput: $("spotifyContentInput"),
+  spotifyImportStatus: $("spotifyImportStatus"),
+  spotifyImportBtn: $("spotifyImportBtn"),
 
   cacheModal: $("cacheModal"),
   closeCacheBtn: $("closeCacheBtn"),
@@ -1031,7 +1056,29 @@ async function renderHomeView() {
 }
 
 /* ==================== 2. SEARCH VIEW (Audio X Image 2) ==================== */
+const ONLINE_SOURCE_LABELS = {
+  ytmusic: "YouTube Music",
+  youtube: "YouTube",
+  soundcloud: "SoundCloud",
+};
+
 async function renderSearchView() {
+  el.searchSourceTabs?.querySelectorAll("[data-search-source]").forEach((btn) => {
+    btn.classList.toggle("active", btn.getAttribute("data-search-source") === state.searchSource);
+  });
+
+  if (state.searchSource !== "library") {
+    el.searchDiscoverWrap.classList.add("hidden");
+    el.searchResultsWrap.classList.remove("hidden");
+    el.localFilterPills?.classList.add("hidden");
+    el.searchTopResultWrap.classList.add("hidden");
+    el.paginationBar.classList.add("hidden");
+    await loadOnlineSearchResults();
+    return;
+  }
+
+  el.localFilterPills?.classList.remove("hidden");
+
   const hasQueryOrFilters = Boolean(
     state.searchQuery.trim() ||
       state.searchTrackerId ||
@@ -1055,6 +1102,95 @@ async function renderSearchView() {
   }
 
   await loadSearchResults();
+}
+
+async function loadOnlineSearchResults() {
+  const q = state.searchQuery.trim();
+  const label = ONLINE_SOURCE_LABELS[state.searchSource] || "Online";
+
+  if (!q) {
+    el.queryTimingBadge.classList.add("hidden");
+    el.searchResultsHeading.textContent = `Search ${label}`;
+    el.searchResultsSub.textContent = "Type a song title, artist, or link query in the search bar above.";
+    el.searchTrackList.innerHTML = "";
+    el.listEmptyState.classList.add("hidden");
+    return;
+  }
+
+  const seq = ++state.onlineSearchReqSeq;
+  el.searchResultsHeading.textContent = `${label}: "${q}"`;
+  el.searchResultsSub.textContent = `Searching ${label}...`;
+  el.listEmptyState.classList.add("hidden");
+
+  try {
+    const data = await apiJson(
+      `/api/discover/search?q=${encodeURIComponent(q)}&source=${encodeURIComponent(state.searchSource)}&limit=15`
+    );
+    if (seq !== state.onlineSearchReqSeq || state.searchSource === "library") return;
+
+    const results = data.results || [];
+    state.onlineResults = results;
+    el.queryTimingBadge.textContent = `${results.length} · ${label}`;
+    el.queryTimingBadge.classList.remove("hidden");
+    el.searchResultsSub.textContent = `${results.length} playable results on ${label} (click Play to stream & save to library)`;
+
+    el.searchTrackList.innerHTML = results
+      .map((item, idx) => {
+        const thumb = item.thumbnail ? coverUrl(item.thumbnail) : "";
+        const metaParts = [item.artist, item.album, item.durationText].filter(Boolean);
+        return `
+          <div class="simple-row online-result-row" data-online-idx="${idx}">
+            <div class="simple-thumb" style="background:${MIX_GRADIENTS[idx % MIX_GRADIENTS.length]}">
+              <span>${escapeHtml(monogram(item.title))}</span>
+              ${thumb ? `<img src="${escapeHtml(thumb)}" alt="" onerror="this.remove()" />` : ""}
+            </div>
+            <div class="track-item-main">
+              <div class="track-item-title">${escapeHtml(item.title)}</div>
+              <div class="track-item-sub">${escapeHtml(metaParts.join(" · "))}</div>
+            </div>
+            <div class="online-action-group">
+              <button type="button" class="pill-btn" data-online-save="${idx}">+ Save</button>
+              <button type="button" class="btn btn-accent btn-sm" data-online-play="${idx}">Play</button>
+            </div>
+          </div>
+        `;
+      })
+      .join("");
+    el.listEmptyState.classList.toggle("hidden", results.length > 0);
+  } catch (err) {
+    if (seq !== state.onlineSearchReqSeq) return;
+    el.searchResultsSub.textContent = `Search failed: ${err.message}`;
+    el.searchTrackList.innerHTML = "";
+    el.listEmptyState.classList.remove("hidden");
+  }
+}
+
+async function importOnlineResult(idx, autoPlay) {
+  const item = state.onlineResults[idx];
+  if (!item) return;
+  showToast(`${autoPlay ? "Loading stream" : "Saving"} "${item.title}"...`);
+  try {
+    const res = await apiJson("/api/discover/import-url", {
+      method: "POST",
+      body: JSON.stringify({
+        url: item.url,
+        title: item.title,
+        artist: item.artist,
+        album: item.album,
+        thumbnail: item.thumbnail,
+        enrichMusicBrainz: true,
+      }),
+    });
+    rememberTracks([res.track]);
+    await Promise.all([refreshTrackers(), refreshActivity()]);
+    if (autoPlay && res.track) {
+      await playTrack(res.track);
+    } else {
+      showToast(`Saved "${res.track?.title || item.title}" to Imported Web Tracks.`, "success");
+    }
+  } catch (err) {
+    showToast(err.message, "error");
+  }
 }
 
 function renderSearchDiscover() {
@@ -1821,6 +1957,7 @@ async function playTrack(track, linkIndex = undefined, replaceContext = true) {
       ? `/api/tracks/${encodeURIComponent(track.id)}/stream?linkIndex=${linkIndex}`
       : `/api/tracks/${encodeURIComponent(track.id)}/stream`;
 
+  el.audioEl.dataset.compatTried = "";
   el.audioEl.src = streamUrl;
   el.audioEl.playbackRate = state.playbackRate;
 
@@ -2099,6 +2236,9 @@ function renderInspectorContent(track) {
       <button type="button" id="inspCacheBtn" class="pill-btn" ${track.isPlayable ? "" : "disabled"}>
         ${track.cacheStatus?.isComplete ? "Offline ✓" : "Save offline"}
       </button>
+      <button type="button" id="inspMbBtn" class="pill-btn" title="Normalize artist/album & fetch square cover art">
+        Enrich Metadata
+      </button>
     </div>
 
     <div class="inspector-block">
@@ -2157,6 +2297,49 @@ function renderInspectorContent(track) {
   $("inspAddPlBtn")?.addEventListener("click", () => openAddToPlaylistModal(track.id));
   $("inspQueueBtn")?.addEventListener("click", () => addToUserQueue(track, true));
   $("inspCacheBtn")?.addEventListener("click", () => precacheTrack(track.id));
+  $("inspMbBtn")?.addEventListener("click", async () => {
+    const btn = $("inspMbBtn");
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "Matching...";
+    }
+    try {
+      const res = await apiJson("/api/metadata/musicbrainz", {
+        method: "POST",
+        body: JSON.stringify({ trackId: track.id }),
+      });
+      if (!res.matched || !res.track) {
+        showToast("No MusicBrainz match found for this track.");
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = "Enrich Metadata";
+        }
+        return;
+      }
+      rememberTracks([res.track]);
+      state.selectedTrack = res.track;
+      if (state.playingTrack?.id === res.track.id) {
+        state.playingTrack = res.track;
+        el.playerTitle.textContent = res.track.title;
+        el.playerSubtitle.textContent = `${res.track.artist} · ${res.track.era}`;
+        const artSrc = coverUrl(res.track.eraImage || "", res.track.artist, res.track.era);
+        el.playerArtTrigger.innerHTML =
+          `<span>${escapeHtml(monogram(res.track.title))}</span>` +
+          (artSrc ? `<img src="${escapeHtml(artSrc)}" alt="" onerror="this.remove()" />` : "");
+        updateFullscreenMeta();
+      }
+      renderInspectorContent(res.track);
+      refreshVisibleTrackRows();
+      await refreshActivity();
+      showToast(`Updated metadata from MusicBrainz: ${res.track.artist} — ${res.track.title}`, "success");
+    } catch (err) {
+      showToast(err.message, "error");
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Enrich Metadata";
+      }
+    }
+  });
   el.inspectorContent.querySelectorAll("[data-play-mirror]").forEach((btn) => {
     btn.addEventListener("click", () => playTrack(track, Number(btn.getAttribute("data-play-mirror"))));
   });
@@ -2502,8 +2685,19 @@ function openProfileModal() {
   el.profileNameInput.focus();
 }
 
+function switchSyncTab(tabName) {
+  el.syncModalTabs?.querySelectorAll("[data-sync-tab]").forEach((btn) => {
+    btn.classList.toggle("active", btn.getAttribute("data-sync-tab") === tabName);
+  });
+  el.syncTabArtistGrid?.classList.toggle("hidden", tabName !== "artistgrid");
+  el.syncTabUrl?.classList.toggle("hidden", tabName !== "url");
+  el.syncTabLocal?.classList.toggle("hidden", tabName !== "local");
+  el.syncTabSpotify?.classList.toggle("hidden", tabName !== "spotify");
+}
+
 async function openSyncModal() {
   el.syncModal.classList.remove("hidden");
+  switchSyncTab("artistgrid");
   el.trackerInput.focus();
   if (state.directoryArtists.length === 0) {
     el.directoryList.innerHTML = `<div class="muted small">Loading ArtistGrid directory...</div>`;
@@ -2871,6 +3065,7 @@ function bindEvents() {
     const val = el.searchInput.value;
     el.clearSearchInputBtn.classList.toggle("hidden", !val);
     clearTimeout(searchTimer);
+    const delayMs = state.searchSource === "library" ? 100 : 320;
     searchTimer = setTimeout(async () => {
       state.searchQuery = val;
       state.searchOffset = 0;
@@ -2879,7 +3074,31 @@ function bindEvents() {
       } else {
         await renderSearchView();
       }
-    }, 100);
+    }, delayMs);
+  });
+
+  el.searchSourceTabs?.addEventListener("click", async (ev) => {
+    const btn = ev.target.closest("[data-search-source]");
+    if (!btn) return;
+    const src = btn.getAttribute("data-search-source") || "library";
+    if (state.searchSource === src) return;
+    state.searchSource = src;
+    state.searchOffset = 0;
+    await renderSearchView();
+  });
+
+  el.searchTrackList.addEventListener("click", async (ev) => {
+    const playOnline = ev.target.closest("[data-online-play]");
+    if (playOnline) {
+      ev.stopPropagation();
+      await importOnlineResult(Number(playOnline.getAttribute("data-online-play")), true);
+      return;
+    }
+    const saveOnline = ev.target.closest("[data-online-save]");
+    if (saveOnline) {
+      ev.stopPropagation();
+      await importOnlineResult(Number(saveOnline.getAttribute("data-online-save")), false);
+    }
   });
 
   el.searchInput.addEventListener("keydown", async (ev) => {
@@ -3416,6 +3635,14 @@ function bindEvents() {
   });
   el.audioEl.addEventListener("error", () => {
     if (!state.playingTrack) return;
+    if (!el.audioEl.dataset.compatTried && el.audioEl.src && !el.audioEl.src.includes("compat=1")) {
+      el.audioEl.dataset.compatTried = "1";
+      const sep = el.audioEl.src.includes("?") ? "&" : "?";
+      el.audioEl.src = `${el.audioEl.src}${sep}compat=1`;
+      showToast(`Retrying "${state.playingTrack.title}" via ffmpeg compatibility stream...`);
+      el.audioEl.play().catch(() => {});
+      return;
+    }
     showToast(`Could not decode/play "${state.playingTrack.title}". Try another mirror in Track Inspector.`, "error");
   });
 
@@ -3621,10 +3848,15 @@ function bindEvents() {
     }
   });
 
-  // Sync Modal
+  // Sync & Imports Modal
   el.closeSyncModalBtn.addEventListener("click", () => el.syncModal.classList.add("hidden"));
   el.syncModal.addEventListener("click", (ev) => {
     if (ev.target === el.syncModal) el.syncModal.classList.add("hidden");
+  });
+  el.syncModalTabs?.addEventListener("click", (ev) => {
+    const btn = ev.target.closest("[data-sync-tab]");
+    if (!btn) return;
+    switchSyncTab(btn.getAttribute("data-sync-tab"));
   });
   el.syncForm.addEventListener("submit", (ev) => {
     ev.preventDefault();
@@ -3638,6 +3870,109 @@ function bindEvents() {
     const id = row.getAttribute("data-dir-id");
     el.trackerInput.value = id;
     await syncTracker(id);
+  });
+
+  el.importUrlForm?.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const targetUrl = el.importUrlInput.value.trim();
+    if (!targetUrl) return;
+    el.importUrlBtn.disabled = true;
+    el.importUrlBtn.textContent = "Importing...";
+    showToast("Resolving media stream & metadata...");
+    try {
+      const res = await apiJson("/api/discover/import-url", {
+        method: "POST",
+        body: JSON.stringify({
+          url: targetUrl,
+          enrichMusicBrainz: Boolean(el.importUrlMbCheck?.checked),
+        }),
+      });
+      el.importUrlInput.value = "";
+      el.syncModal.classList.add("hidden");
+      rememberTracks([res.track]);
+      await Promise.all([refreshTrackers(), refreshActivity()]);
+      showToast(`Imported "${res.track.title}" by ${res.track.artist}`, "success");
+      await playTrack(res.track);
+    } catch (err) {
+      showToast(err.message, "error");
+    } finally {
+      el.importUrlBtn.disabled = false;
+      el.importUrlBtn.textContent = "Import & Play";
+    }
+  });
+
+  el.localScanForm?.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const folderPath = el.localFolderInput.value.trim();
+    if (!folderPath) return;
+    el.localScanBtn.disabled = true;
+    el.localScanBtn.textContent = "Scanning...";
+    el.localScanStatus.classList.remove("hidden");
+    el.localScanStatus.textContent = `Scanning "${folderPath}" with music-metadata...`;
+    try {
+      const res = await apiJson("/api/library/scan-local", {
+        method: "POST",
+        body: JSON.stringify({ folderPath }),
+      });
+      el.localScanStatus.textContent = `Indexed ${res.indexedTracks} audio files across ${res.albumsCount} album(s) in ${res.elapsedMs} ms.`;
+      await Promise.all([refreshTrackers(), refreshActivity()]);
+      showToast(`Scanned ${res.indexedTracks} local tracks!`, "success");
+      if (res.indexedTracks > 0) {
+        el.syncModal.classList.add("hidden");
+        await navigate({ view: "artist", trackerId: "local_files" });
+      }
+    } catch (err) {
+      el.localScanStatus.textContent = err.message;
+      showToast(err.message, "error");
+    } finally {
+      el.localScanBtn.disabled = false;
+      el.localScanBtn.textContent = "Scan Folder";
+    }
+  });
+
+  el.spotifyFileInput?.addEventListener("change", async () => {
+    const file = el.spotifyFileInput.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    el.spotifyContentInput.value = text;
+    if (!el.spotifyPlaylistNameInput.value.trim()) {
+      el.spotifyPlaylistNameInput.value = file.name.replace(/\.(csv|json|txt)$/i, "").replace(/[_-]+/g, " ");
+    }
+  });
+
+  el.spotifyImportForm?.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const content = el.spotifyContentInput.value.trim();
+    if (!content) return;
+    el.spotifyImportBtn.disabled = true;
+    el.spotifyImportBtn.textContent = "Matching & Importing...";
+    el.spotifyImportStatus.classList.remove("hidden");
+    el.spotifyImportStatus.textContent = "Matching Spotify tracks against local archive and online sources...";
+    try {
+      const res = await apiJson("/api/import/spotify", {
+        method: "POST",
+        body: JSON.stringify({
+          content,
+          playlistName: el.spotifyPlaylistNameInput.value.trim() || "Spotify Import",
+          sourcePreference: el.spotifySourceSelect.value || "ytmusic",
+          resolveOnline: true,
+          createPlaylist: true,
+        }),
+      });
+      el.spotifyImportStatus.textContent = `Imported ${res.tracksAdded}/${res.totalParsed} tracks (${res.matchedLocal} local, ${res.matchedOnline} online).`;
+      await Promise.all([refreshAllCore()]);
+      showToast(`Created "${res.playlist?.name || "Spotify Import"}" (${res.tracksAdded} tracks)`, "success");
+      if (res.playlist?.id) {
+        el.syncModal.classList.add("hidden");
+        await navigate({ view: "playlist", playlistId: res.playlist.id });
+      }
+    } catch (err) {
+      el.spotifyImportStatus.textContent = err.message;
+      showToast(err.message, "error");
+    } finally {
+      el.spotifyImportBtn.disabled = false;
+      el.spotifyImportBtn.textContent = "Migrate Playlist";
+    }
   });
 
   // Cache / Settings Modal

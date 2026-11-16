@@ -11,6 +11,8 @@ export type HostKind =
   | "googledrive"
   | "exoshare"
   | "youtube"
+  | "bandcamp"
+  | "local"
   | "direct"
   | "unknown";
 
@@ -23,7 +25,7 @@ export interface TrackLink {
 }
 
 export interface AudioHeaderInfo {
-  codec: "FLAC" | "WAV" | "MP3" | "AAC/M4A" | "OGG" | "UNKNOWN";
+  codec: "FLAC" | "WAV" | "ALAC" | "OPUS" | "MP3" | "AAC/M4A" | "OGG" | "UNKNOWN";
   sampleRateHz?: number;
   bitsPerSample?: number;
   channels?: number;
@@ -154,6 +156,12 @@ export type HostResolution =
       filename: string | null;
       sizeBytes: number | null;
       formatHint: string | null;
+      httpHeaders?: Record<string, string>;
+      durationSec?: number | null;
+      thumbnail?: string | null;
+      title?: string | null;
+      artist?: string | null;
+      album?: string | null;
     }
   | {
       ok: false;

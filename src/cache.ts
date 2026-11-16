@@ -6,8 +6,23 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { USER_AGENT } from "./config.ts";
 import type { AppDatabase } from "./db.ts";
+import { findFfprobeExecutable, probeAudioWithFfprobe } from "./media-tools.ts";
 import { mimeToExtension, type FetchLike } from "./resolver.ts";
 import type { AudioHeaderInfo, ByteRange, CacheEntry, CacheStats } from "./types.ts";
+
+function buildUpstreamHeaders(
+  baseHeaders?: Record<string, string>,
+  rangeHeader?: string
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    "User-Agent": USER_AGENT,
+    ...(baseHeaders ?? {}),
+  };
+  if (rangeHeader) {
+    headers.Range = rangeHeader;
+  }
+  return headers;
+}
 
 interface SegmentFile {
   start: number;
@@ -438,6 +453,23 @@ export class DiskCacheManager {
         }
       }
 
+      // Enhance header detection via ffprobe for WebM/Opus/ALAC/M4A/OGG when >= 4KB cached
+      if (
+        segments[0]?.start === 0 &&
+        segments[0].end + 1 >= 4096 &&
+        (!audioMeta || (!audioMeta.sampleRateHz && !audioMeta.durationSec)) &&
+        findFfprobeExecutable()
+      ) {
+        try {
+          const probed = await probeAudioWithFfprobe(segments[0].filePath);
+          if (probed) {
+            audioMeta = audioMeta ? { ...audioMeta, ...probed } : probed;
+          }
+        } catch {
+          // ignore ffprobe fallback failure
+        }
+      }
+
       const existing = this.db.getCacheEntry(cacheKey);
       const totalBytes = meta.totalBytes ?? existing?.totalBytes ?? null;
       const isComplete =
@@ -632,8 +664,113 @@ export class DiskCacheManager {
         return "audio/aac";
       case "opus":
         return "audio/opus";
+      case "webm":
+        return "audio/webm";
       default:
         return mimeHeader || "audio/mpeg";
+    }
+  }
+
+  public async streamLocalFile(
+    filePath: string,
+    req: IncomingMessage,
+    res: ServerResponse,
+    mimeHint?: string | null
+  ): Promise<void> {
+    let stat: fs.Stats;
+    try {
+      stat = await fsp.stat(filePath);
+    } catch {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: `Local file not found: ${filePath}` }));
+      return;
+    }
+    if (!stat.isFile()) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: `Path is not a file: ${filePath}` }));
+      return;
+    }
+
+    const total = stat.size;
+    const mime = this.inferMime(mimeHint ?? null, path.basename(filePath), filePath);
+
+    if (req.method === "HEAD") {
+      res.writeHead(200, {
+        "Content-Type": mime,
+        "Accept-Ranges": "bytes",
+        "Content-Length": total,
+        "X-Cache-Status": "LOCAL",
+      });
+      res.end();
+      return;
+    }
+
+    const parsed = parseRangeHeader(req.headers.range, total);
+    if (parsed.invalid) {
+      res.writeHead(416, { "Content-Range": `bytes */${total}` });
+      res.end();
+      return;
+    }
+
+    const start = parsed.start;
+    const end = parsed.end ?? Math.max(0, total - 1);
+    const len = total === 0 ? 0 : end - start + 1;
+
+    const headers: Record<string, string | number> = {
+      "Content-Type": mime,
+      "Accept-Ranges": "bytes",
+      "Content-Length": len,
+      "X-Cache-Status": "LOCAL",
+    };
+
+    if (parsed.hasRangeHeader) {
+      headers["Content-Range"] = `bytes ${start}-${end}/${total}`;
+      res.writeHead(206, headers);
+    } else {
+      res.writeHead(200, headers);
+    }
+
+    if (len === 0) {
+      res.end();
+      return;
+    }
+
+    const abortSignal = new AbortController();
+    const onClose = () => abortSignal.abort();
+    req.on("close", onClose);
+    res.on("close", onClose);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const rs = fs.createReadStream(filePath, { start, end });
+        const onAbort = () => {
+          rs.destroy();
+          resolve();
+        };
+        abortSignal.signal.addEventListener("abort", onAbort, { once: true });
+        rs.on("data", (chunk) => {
+          if (abortSignal.signal.aborted || res.destroyed) {
+            rs.destroy();
+            return;
+          }
+          if (!res.write(chunk)) {
+            rs.pause();
+            res.once("drain", () => rs.resume());
+          }
+        });
+        rs.on("end", () => {
+          abortSignal.signal.removeEventListener("abort", onAbort);
+          resolve();
+        });
+        rs.on("error", (err) => {
+          abortSignal.signal.removeEventListener("abort", onAbort);
+          reject(err);
+        });
+      });
+      if (!res.writableEnded) res.end();
+    } finally {
+      req.off("close", onClose);
+      res.off("close", onClose);
     }
   }
 
@@ -644,6 +781,11 @@ export class DiskCacheManager {
       trackId: string | null;
       sourceUrl: string;
       resolvedUrl: string;
+      upstreamHeaders?: Record<string, string>;
+      onExpiredUpstream?: () => Promise<{
+        resolvedUrl: string;
+        upstreamHeaders?: Record<string, string>;
+      } | null>;
     }
   ): Promise<void> {
     const cacheKey = computeCacheKey(target.sourceUrl);
@@ -655,6 +797,8 @@ export class DiskCacheManager {
     res.on("close", onClientClose);
 
     try {
+      let resolvedUrl = target.resolvedUrl;
+      let upstreamHeaders = target.upstreamHeaders;
       const entry = this.db.getCacheEntry(cacheKey);
       const segments = await this.listSegments(cacheKey);
       const knownTotal = entry?.totalBytes ?? null;
@@ -662,7 +806,7 @@ export class DiskCacheManager {
       if (req.method === "HEAD") {
         if (entry && knownTotal != null) {
           res.writeHead(200, {
-            "Content-Type": this.inferMime(entry.mimeType, entry.filename, target.resolvedUrl),
+            "Content-Type": this.inferMime(entry.mimeType, entry.filename, resolvedUrl),
             "Accept-Ranges": "bytes",
             "Content-Length": knownTotal,
             "X-Cache-Status": entry.isComplete ? "HIT" : "PARTIAL",
@@ -670,16 +814,16 @@ export class DiskCacheManager {
           res.end();
           return;
         }
-        const headRes = await this.fetchImpl(target.resolvedUrl, {
+        const headRes = await this.fetchImpl(resolvedUrl, {
           method: "HEAD",
-          headers: { "User-Agent": USER_AGENT },
+          headers: buildUpstreamHeaders(upstreamHeaders),
           signal: clientAbort.signal,
         });
         res.writeHead(headRes.ok ? 200 : headRes.status, {
           "Content-Type": this.inferMime(
             headRes.headers.get("content-type"),
             parseContentDispositionFilename(headRes.headers.get("content-disposition")),
-            target.resolvedUrl
+            resolvedUrl
           ),
           "Accept-Ranges": headRes.headers.get("accept-ranges") ?? "bytes",
           ...(headRes.headers.get("content-length")
@@ -705,7 +849,7 @@ export class DiskCacheManager {
         const hit = this.findContiguousPrefix(segments, parsed.start, parsed.end);
         if (hit && hit.hitEnd >= parsed.end) {
           this.db.touchCacheEntry(cacheKey);
-          const mime = this.inferMime(entry?.mimeType ?? null, entry?.filename ?? null, target.resolvedUrl);
+          const mime = this.inferMime(entry?.mimeType ?? null, entry?.filename ?? null, resolvedUrl);
           const len = parsed.end - parsed.start + 1;
           const headers: Record<string, string | number> = {
             "Content-Type": mime,
@@ -729,24 +873,34 @@ export class DiskCacheManager {
         // Partial prefix hit: serve cached prefix + fetch upstream tail
         if (hit && hit.hitEnd >= parsed.start) {
           const tailStart = hit.hitEnd + 1;
-          const upstreamHeaders: Record<string, string> = {
-            "User-Agent": USER_AGENT,
-            Range:
-              parsed.explicitEnd !== null
-                ? `bytes=${tailStart}-${parsed.end}`
-                : `bytes=${tailStart}-`,
-          };
-          const upstreamRes = await this.fetchImpl(target.resolvedUrl, {
-            headers: upstreamHeaders,
+          const tailRange =
+            parsed.explicitEnd !== null
+              ? `bytes=${tailStart}-${parsed.end}`
+              : `bytes=${tailStart}-`;
+          let upstreamRes = await this.fetchImpl(resolvedUrl, {
+            headers: buildUpstreamHeaders(upstreamHeaders, tailRange),
             signal: clientAbort.signal,
           });
+
+          if (upstreamRes.status === 403 && target.onExpiredUpstream) {
+            await upstreamRes.body?.cancel().catch(() => {});
+            const refreshed = await target.onExpiredUpstream();
+            if (refreshed?.resolvedUrl) {
+              resolvedUrl = refreshed.resolvedUrl;
+              upstreamHeaders = refreshed.upstreamHeaders ?? upstreamHeaders;
+              upstreamRes = await this.fetchImpl(resolvedUrl, {
+                headers: buildUpstreamHeaders(upstreamHeaders, tailRange),
+                signal: clientAbort.signal,
+              });
+            }
+          }
 
           const upstreamCr = parseContentRangeHeader(upstreamRes.headers.get("content-range"));
           if (upstreamRes.status === 206 && upstreamRes.body && upstreamCr?.start === tailStart) {
             const mime = this.inferMime(
               entry?.mimeType ?? upstreamRes.headers.get("content-type"),
               entry?.filename ?? parseContentDispositionFilename(upstreamRes.headers.get("content-disposition")),
-              target.resolvedUrl
+              resolvedUrl
             );
             const len = parsed.end - parsed.start + 1;
             const headers: Record<string, string | number> = {
@@ -772,7 +926,7 @@ export class DiskCacheManager {
                 cacheKey,
                 trackId: target.trackId,
                 sourceUrl: target.sourceUrl,
-                resolvedUrl: target.resolvedUrl,
+                resolvedUrl,
                 mimeType: mime,
                 filename: entry?.filename ?? null,
                 totalBytes: knownTotal,
@@ -786,20 +940,29 @@ export class DiskCacheManager {
       }
 
       // Cache miss at reqStart: request from upstream
-      const reqHeaders: Record<string, string> = {
-        "User-Agent": USER_AGENT,
-      };
-      if (parsed.hasRangeHeader) {
-        reqHeaders.Range =
-          parsed.explicitEnd !== null
-            ? `bytes=${parsed.start}-${parsed.explicitEnd}`
-            : `bytes=${parsed.start}-`;
-      }
+      const missRange = parsed.hasRangeHeader
+        ? parsed.explicitEnd !== null
+          ? `bytes=${parsed.start}-${parsed.explicitEnd}`
+          : `bytes=${parsed.start}-`
+        : undefined;
 
-      const upstreamRes = await this.fetchImpl(target.resolvedUrl, {
-        headers: reqHeaders,
+      let upstreamRes = await this.fetchImpl(resolvedUrl, {
+        headers: buildUpstreamHeaders(upstreamHeaders, missRange),
         signal: clientAbort.signal,
       });
+
+      if (upstreamRes.status === 403 && target.onExpiredUpstream) {
+        await upstreamRes.body?.cancel().catch(() => {});
+        const refreshed = await target.onExpiredUpstream();
+        if (refreshed?.resolvedUrl) {
+          resolvedUrl = refreshed.resolvedUrl;
+          upstreamHeaders = refreshed.upstreamHeaders ?? upstreamHeaders;
+          upstreamRes = await this.fetchImpl(resolvedUrl, {
+            headers: buildUpstreamHeaders(upstreamHeaders, missRange),
+            signal: clientAbort.signal,
+          });
+        }
+      }
 
       const rawMime = upstreamRes.headers.get("content-type");
       if (!upstreamRes.ok && upstreamRes.status !== 206) {
@@ -845,7 +1008,7 @@ export class DiskCacheManager {
       }
 
       const filename = parseContentDispositionFilename(upstreamRes.headers.get("content-disposition"));
-      const mime = this.inferMime(rawMime, filename, target.resolvedUrl);
+      const mime = this.inferMime(rawMime, filename, resolvedUrl);
       const contentRange = parseContentRangeHeader(upstreamRes.headers.get("content-range"));
       const contentLengthHeader = upstreamRes.headers.get("content-length");
       const upstreamContentLen = contentLengthHeader ? Number(contentLengthHeader) : null;
@@ -894,7 +1057,7 @@ export class DiskCacheManager {
         cacheKey,
         trackId: target.trackId,
         sourceUrl: target.sourceUrl,
-        resolvedUrl: target.resolvedUrl,
+        resolvedUrl,
         mimeType: mime,
         filename,
         totalBytes,
@@ -1032,10 +1195,22 @@ export class DiskCacheManager {
     }
   }
 
+  public async getCompleteCachedFile(sourceUrl: string): Promise<string | null> {
+    const cacheKey = computeCacheKey(sourceUrl);
+    const entry = this.db.getCacheEntry(cacheKey);
+    if (!entry?.isComplete) return null;
+    const segments = await this.listSegments(cacheKey);
+    if (segments.length === 1 && segments[0]?.start === 0) {
+      return segments[0].filePath;
+    }
+    return null;
+  }
+
   public async prefetchFullTrack(target: {
     trackId: string | null;
     sourceUrl: string;
     resolvedUrl: string;
+    upstreamHeaders?: Record<string, string>;
   }): Promise<CacheEntry> {
     const cacheKey = computeCacheKey(target.sourceUrl);
     const existingPromise = this.activePrefetches.get(cacheKey);
@@ -1053,8 +1228,10 @@ export class DiskCacheManager {
         const segments = await this.listSegments(cacheKey);
         const startOffset = segments[0]?.start === 0 ? segments[0].end + 1 : 0;
 
-        const headers: Record<string, string> = { "User-Agent": USER_AGENT };
-        if (startOffset > 0) headers.Range = `bytes=${startOffset}-`;
+        const headers = buildUpstreamHeaders(
+          target.upstreamHeaders,
+          startOffset > 0 ? `bytes=${startOffset}-` : undefined
+        );
 
         const upstreamRes = await this.fetchImpl(target.resolvedUrl, { headers });
         const rawMime = upstreamRes.headers.get("content-type");

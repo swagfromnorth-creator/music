@@ -14,5 +14,9 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^5.8.0"
+  },
+  "dependencies": {
+    "music-metadata": "^12.5.0",
+    "youtubei.js": "^18.3.0"
   }
 }

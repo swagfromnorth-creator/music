@@ -254,6 +254,13 @@
 
             <!-- 2. SEARCH VIEW (Audio X Image 2 Inspired) -->
             <section id="searchView" class="view-section hidden">
+              <div class="search-source-bar" id="searchSourceTabs" role="tablist" aria-label="Search source">
+                <button type="button" class="chip-btn active" data-search-source="library">Library</button>
+                <button type="button" class="chip-btn" data-search-source="ytmusic">YouTube Music</button>
+                <button type="button" class="chip-btn" data-search-source="youtube">YouTube</button>
+                <button type="button" class="chip-btn" data-search-source="soundcloud">SoundCloud</button>
+              </div>
+
               <!-- Empty Query Discovery State -->
               <div id="searchDiscoverWrap">
                 <div id="recentSearchesBlock" class="content-block hidden">
@@ -279,7 +286,7 @@
                     <h2 id="searchResultsHeading">Results</h2>
                     <div id="searchResultsSub" class="muted small"></div>
                   </div>
-                  <div class="filter-pills">
+                  <div class="filter-pills" id="localFilterPills">
                     <select id="trackerSelect" class="compact-select hidden" aria-label="Filter by artist"></select>
                     <select id="tabSelect" class="compact-select hidden" aria-label="Tracker tab"></select>
                     <select id="eraSelect" class="compact-select" aria-label="Era filter">
@@ -835,41 +842,144 @@
       </div>
     </div>
 
-    <!-- Modal: Add ArtistGrid Tracker & Directory -->
+    <!-- Modal: Add Music, Local Files & Imports -->
     <div id="syncModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
-      <div class="modal-card">
+      <div class="modal-card modal-wide">
         <div class="modal-header">
-          <h3>Add ArtistGrid Tracker</h3>
+          <h3>Add Music &amp; Imports</h3>
           <button type="button" id="closeSyncModalBtn" class="nav-circle-btn">✕</button>
         </div>
         <div class="modal-body">
-          <form id="syncForm" class="sync-form">
-            <input
-              id="trackerInput"
-              type="text"
-              placeholder="Paste 44-char spreadsheet ID or Google Sheets URL..."
-              autocomplete="off"
-              spellcheck="false"
-            />
-            <button type="submit" id="syncBtn" class="btn btn-accent">Sync</button>
-          </form>
-
-          <div class="demo-banner-row">
-            <div>
-              <div style="font-weight:600; font-size:13px">Want to preview offline?</div>
-              <div class="muted small">Load 2 studio artists, 10 lossless WAV tracks, and curated playlists locally.</div>
-            </div>
-            <button type="button" id="modalSeedDemoBtn" class="pill-btn">Load demo</button>
+          <div class="underline-tabs" id="syncModalTabs" role="tablist">
+            <button type="button" class="underline-tab active" data-sync-tab="artistgrid">ArtistGrid</button>
+            <button type="button" class="underline-tab" data-sync-tab="url">URL / Link</button>
+            <button type="button" class="underline-tab" data-sync-tab="local">Local Folder</button>
+            <button type="button" class="underline-tab" data-sync-tab="spotify">Spotify Import</button>
           </div>
 
-          <div class="divider-label">Or browse ArtistGrid directory</div>
+          <!-- Tab 1: ArtistGrid Tracker -->
+          <div id="syncTabArtistGrid" class="sync-tab-panel">
+            <form id="syncForm" class="sync-form">
+              <input
+                id="trackerInput"
+                type="text"
+                placeholder="Paste 44-char spreadsheet ID or Google Sheets URL..."
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <button type="submit" id="syncBtn" class="btn btn-accent">Sync</button>
+            </form>
 
-          <input
-            id="directorySearchInput"
-            type="search"
-            placeholder="Filter 600+ artists (e.g. Kendrick, Kanye, Carti, Frank Ocean)..."
-          />
-          <div id="directoryList" class="directory-list">Loading directory...</div>
+            <div class="demo-banner-row">
+              <div>
+                <div style="font-weight:600; font-size:13px">Want to preview offline?</div>
+                <div class="muted small">Load 2 studio artists, 10 lossless WAV tracks, and curated playlists locally.</div>
+              </div>
+              <button type="button" id="modalSeedDemoBtn" class="pill-btn">Load demo</button>
+            </div>
+
+            <div class="divider-label">Or browse ArtistGrid directory</div>
+
+            <input
+              id="directorySearchInput"
+              type="search"
+              placeholder="Filter 600+ artists (e.g. Kendrick, Kanye, Carti, Frank Ocean)..."
+            />
+            <div id="directoryList" class="directory-list">Loading directory...</div>
+          </div>
+
+          <!-- Tab 2: Import URL (YouTube, SoundCloud, Bandcamp, Direct Audio) -->
+          <div id="syncTabUrl" class="sync-tab-panel hidden">
+            <p class="muted small">
+              Paste any YouTube, YouTube Music, SoundCloud, Bandcamp, Pixeldrain, or direct FLAC/MP3 link.
+              Metadata and square cover art will be cleaned and normalized automatically.
+            </p>
+            <form id="importUrlForm" class="sync-form-stack">
+              <label class="field-label">
+                <span>Media or Audio URL</span>
+                <input
+                  id="importUrlInput"
+                  type="url"
+                  placeholder="https://www.youtube.com/watch?v=... or https://soundcloud.com/..."
+                  required
+                  autocomplete="off"
+                />
+              </label>
+              <label class="check-inline">
+                <input id="importUrlMbCheck" type="checkbox" checked />
+                <span>Auto-clean title &amp; fetch square album art via MusicBrainz</span>
+              </label>
+              <div class="modal-footer-actions">
+                <button type="submit" id="importUrlBtn" class="btn btn-accent">Import &amp; Play</button>
+              </div>
+            </form>
+          </div>
+
+          <!-- Tab 3: Scan Local Music Folder -->
+          <div id="syncTabLocal" class="sync-tab-panel hidden">
+            <p class="muted small">
+              Index a local folder of FLAC, WAV, ALAC, MP3, M4A, OGG, or OPUS files. Reads ID3/Vorbis tags and
+              extracts embedded album covers without duplicating your audio files.
+            </p>
+            <form id="localScanForm" class="sync-form-stack">
+              <label class="field-label">
+                <span>Folder Path on This PC</span>
+                <input
+                  id="localFolderInput"
+                  type="text"
+                  placeholder="e.g. C:\Users\manny\Music"
+                  required
+                  autocomplete="off"
+                />
+              </label>
+              <div id="localScanStatus" class="muted small hidden"></div>
+              <div class="modal-footer-actions">
+                <button type="submit" id="localScanBtn" class="btn btn-accent">Scan Folder</button>
+              </div>
+            </form>
+          </div>
+
+          <!-- Tab 4: Spotify CSV / JSON Playlist Migration -->
+          <div id="syncTabSpotify" class="sync-tab-panel hidden">
+            <p class="muted small">
+              Upload or paste an Exportify CSV, SpotDL JSON, or plain <code>Artist - Song</code> tracklist.
+              VaultStream matches your local library first and resolves missing tracks via YouTube Music or SoundCloud.
+            </p>
+            <form id="spotifyImportForm" class="sync-form-stack">
+              <div class="two-col-row">
+                <label class="field-label">
+                  <span>Playlist Name</span>
+                  <input id="spotifyPlaylistNameInput" type="text" placeholder="My Spotify Playlist" maxlength="100" />
+                </label>
+                <label class="field-label">
+                  <span>Fallback Source</span>
+                  <select id="spotifySourceSelect">
+                    <option value="ytmusic">YouTube Music</option>
+                    <option value="youtube">YouTube</option>
+                    <option value="soundcloud">SoundCloud</option>
+                  </select>
+                </label>
+              </div>
+              <div class="two-col-row" style="align-items:center">
+                <label class="pill-btn" style="cursor:pointer; display:inline-flex; align-items:center; gap:6px; width:fit-content">
+                  <span>Load CSV / JSON file</span>
+                  <input id="spotifyFileInput" type="file" accept=".csv,.json,.txt" class="hidden" />
+                </label>
+                <span class="muted small">or paste playlist contents below (up to 100 tracks)</span>
+              </div>
+              <textarea
+                id="spotifyContentInput"
+                class="import-textarea"
+                rows="6"
+                placeholder="Track Name,Artist Name,Album Name&#10;Nights,Frank Ocean,Blonde"
+                required
+              ></textarea>
+              <div id="spotifyImportStatus" class="muted small hidden"></div>
+              <div class="modal-footer-actions">
+                <button type="submit" id="spotifyImportBtn" class="btn btn-accent">Migrate Playlist</button>
+              </div>
+            </form>
+          </div>
         </div>
       </div>
     </div>
