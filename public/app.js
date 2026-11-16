@@ -426,6 +426,7 @@ const el = {
   spotifyContentInput: $("spotifyContentInput"),
   spotifyImportStatus: $("spotifyImportStatus"),
   spotifyImportBtn: $("spotifyImportBtn"),
+  spotifyImportReport: $("spotifyImportReport"),
 
   cacheModal: $("cacheModal"),
   closeCacheBtn: $("closeCacheBtn"),
@@ -2940,6 +2941,173 @@ async function seedDemoShowcase() {
   }
 }
 
+function renderSpotifyImportReport(res) {
+  const container = el.spotifyImportReport;
+  if (!container) return;
+
+  const sb = res.sourceBreakdown || {};
+  const chips = [
+    `<span class="import-chip ok">Imported ${res.tracksAdded} / ${res.totalParsed}</span>`,
+    sb.artistgrid ? `<span class="import-chip">ArtistGrid: ${sb.artistgrid}</span>` : "",
+    sb.library ? `<span class="import-chip">Library: ${sb.library}</span>` : "",
+    sb.ytmusic ? `<span class="import-chip">YT Music: ${sb.ytmusic}</span>` : "",
+    sb.soundcloud ? `<span class="import-chip">SoundCloud: ${sb.soundcloud}</span>` : "",
+    sb.youtube ? `<span class="import-chip">YouTube: ${sb.youtube}</span>` : "",
+    sb.direct ? `<span class="import-chip">Direct URL: ${sb.direct}</span>` : "",
+    res.duplicateSkippedCount
+      ? `<span class="import-chip">Duplicates Skipped: ${res.duplicateSkippedCount}</span>`
+      : "",
+    res.unmatchedCount
+      ? `<span class="import-chip fail">Couldn't Import: ${res.unmatchedCount}</span>`
+      : `<span class="import-chip ok">All tracks matched!</span>`,
+  ]
+    .filter(Boolean)
+    .join("");
+
+  const autoSyncedHtml =
+    Array.isArray(res.autoSyncedTrackers) && res.autoSyncedTrackers.length > 0
+      ? `<div class="small muted">Auto-checked ArtistGrid trackers: ${res.autoSyncedTrackers
+          .map((t) => escapeHtml(t))
+          .join(", ")}</div>`
+      : "";
+
+  const unmatchedList = Array.isArray(res.unmatched) ? res.unmatched : [];
+  const unmatchedHtml =
+    unmatchedList.length > 0
+      ? `<div class="import-unmatched-box">
+          <div style="font-weight:700; font-size:13px; color:#fca5a5">
+            Couldn't Be Imported (${unmatchedList.length})
+          </div>
+          ${unmatchedList
+            .map((item, idx) => {
+              const cand = item.bestPartialCandidate;
+              const albumLine = item.album ? ` · <em>${escapeHtml(item.album)}</em>` : "";
+              const sourcesLine = Array.isArray(item.sourcesChecked)
+                ? `Checked: ${item.sourcesChecked.map((s) => escapeHtml(s)).join(" → ")}`
+                : "";
+              return `<div class="import-unmatched-row" data-unmatched-row="${idx}">
+                <div style="min-width:0; flex:1">
+                  <div style="font-weight:600; font-size:13px">${escapeHtml(item.title)} — ${escapeHtml(item.artist)}${albumLine}</div>
+                  <div class="small muted" style="margin-top:2px">${escapeHtml(item.reason || "No match found.")}</div>
+                  ${sourcesLine ? `<div class="small muted" style="opacity:0.8">${sourcesLine}</div>` : ""}
+                </div>
+                <div style="display:flex; gap:6px; flex-shrink:0; flex-wrap:wrap">
+                  ${
+                    cand
+                      ? `<button type="button" class="pill-btn" data-use-closest="${idx}" title="${escapeHtml(cand.title)} (${escapeHtml(cand.source)})">Use Closest</button>`
+                      : ""
+                  }
+                  <button type="button" class="pill-btn" data-manual-search="${idx}">Search Manually</button>
+                </div>
+              </div>`;
+            })
+            .join("")}
+        </div>`
+      : "";
+
+  const matchedItems = Array.isArray(res.matchedItems) ? res.matchedItems : [];
+  const matchedDetailsHtml =
+    matchedItems.length > 0
+      ? `<details class="resolver-details">
+          <summary>Matched Breakdown (${matchedItems.length} tracks)</summary>
+          <div class="import-matched-list" style="margin-top:8px">
+            ${matchedItems
+              .map(
+                (m) => `<div class="import-matched-row">
+                  <span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">
+                    <strong>${escapeHtml(m.matchedTitle)}</strong> — ${escapeHtml(m.matchedArtist)}
+                    ${m.matchedAlbum ? `<span class="muted">(${escapeHtml(m.matchedAlbum)})</span>` : ""}
+                  </span>
+                  <span class="import-chip" style="flex-shrink:0">${escapeHtml(m.matchedSource)} · ${escapeHtml(m.matchReason)}</span>
+                </div>`
+              )
+              .join("")}
+          </div>
+        </details>`
+      : "";
+
+  const dupes = Array.isArray(res.duplicateSkipped) ? res.duplicateSkipped : [];
+  const dupesHtml =
+    dupes.length > 0
+      ? `<details class="resolver-details">
+          <summary>Skipped Duplicates in Playlist (${dupes.length})</summary>
+          <div class="small muted" style="margin-top:6px">
+            ${dupes.map((d) => `${escapeHtml(d.title)} — ${escapeHtml(d.artist)} (${escapeHtml(d.reason)})`).join("<br/>")}
+          </div>
+        </details>`
+      : "";
+
+  const openPlBtn = res.playlist?.id
+    ? `<div class="modal-footer-actions">
+        <button type="button" id="openImportedPlaylistBtn" class="btn btn-accent">Open Playlist "${escapeHtml(res.playlist.name)}"</button>
+      </div>`
+    : "";
+
+  container.innerHTML = `
+    <div class="import-summary-chips">${chips}</div>
+    ${autoSyncedHtml}
+    ${unmatchedHtml}
+    ${dupesHtml}
+    ${matchedDetailsHtml}
+    ${openPlBtn}
+  `;
+  container.classList.remove("hidden");
+
+  container.querySelectorAll("[data-manual-search]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const idx = Number(btn.getAttribute("data-manual-search"));
+      const item = unmatchedList[idx];
+      if (!item) return;
+      const q = `${item.artist && item.artist !== "Unknown Artist" ? item.artist + " " : ""}${item.title}`.trim();
+      el.syncModal.classList.add("hidden");
+      state.searchSource = "ytmusic";
+      state.searchQuery = q;
+      el.searchInput.value = q;
+      el.clearSearchInputBtn?.classList.remove("hidden");
+      await navigate({ view: "search" });
+    });
+  });
+
+  container.querySelectorAll("[data-use-closest]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const idx = Number(btn.getAttribute("data-use-closest"));
+      const item = unmatchedList[idx];
+      const cand = item?.bestPartialCandidate;
+      if (!cand?.url) return;
+      btn.disabled = true;
+      btn.textContent = "Adding...";
+      try {
+        await apiJson("/api/discover/import-url", {
+          method: "POST",
+          body: JSON.stringify({
+            url: cand.url,
+            title: item.title,
+            artist: item.artist,
+            album: item.album || cand.album,
+            playlistId: res.playlist?.id || undefined,
+          }),
+        });
+        btn.textContent = "Added!";
+        const row = container.querySelector(`[data-unmatched-row="${idx}"]`);
+        if (row) row.style.opacity = "0.55";
+        await refreshAllCore();
+        showToast(`Imported closest match for "${item.title}"`, "success");
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = "Retry";
+        showToast(err.message, "error");
+      }
+    });
+  });
+
+  const openBtn = container.querySelector("#openImportedPlaylistBtn");
+  openBtn?.addEventListener("click", async () => {
+    if (!res.playlist?.id) return;
+    el.syncModal.classList.add("hidden");
+    await navigate({ view: "playlist", playlistId: res.playlist.id });
+  });
+}
+
 function renderCacheModal(stats) {
   el.cacheUsedValue.textContent = formatBytes(stats.totalCachedBytes);
   el.cacheCapValue.textContent = formatBytes(stats.maxCacheBytes);
@@ -4169,31 +4337,40 @@ function bindEvents() {
     el.spotifyImportBtn.disabled = true;
     el.spotifyImportBtn.textContent = "Matching & Importing...";
     el.spotifyImportStatus.classList.remove("hidden");
-    el.spotifyImportStatus.textContent = "Matching Spotify tracks against local archive and online sources...";
+    el.spotifyImportStatus.textContent =
+      "Thinking across ArtistGrid trackers, YouTube Music, SoundCloud, and YouTube...";
+    if (el.spotifyImportReport) {
+      el.spotifyImportReport.classList.add("hidden");
+      el.spotifyImportReport.innerHTML = "";
+    }
     try {
       const res = await apiJson("/api/import/spotify", {
         method: "POST",
         body: JSON.stringify({
           content,
-          playlistName: el.spotifyPlaylistNameInput.value.trim() || "Spotify Import",
-          sourcePreference: el.spotifySourceSelect.value || "ytmusic",
+          playlistName: el.spotifyPlaylistNameInput.value.trim() || "Imported Playlist",
+          sourcePreference: el.spotifySourceSelect.value || "auto",
           resolveOnline: true,
           createPlaylist: true,
         }),
       });
-      el.spotifyImportStatus.textContent = `Imported ${res.tracksAdded}/${res.totalParsed} tracks (${res.matchedLocal} local, ${res.matchedOnline} online).`;
+      el.spotifyImportStatus.textContent = `Imported ${res.tracksAdded}/${res.totalParsed} track(s)${
+        res.unmatchedCount > 0 ? ` — ${res.unmatchedCount} couldn't be imported.` : "."
+      }`;
       await Promise.all([refreshAllCore()]);
-      showToast(`Created "${res.playlist?.name || "Spotify Import"}" (${res.tracksAdded} tracks)`, "success");
-      if (res.playlist?.id) {
-        el.syncModal.classList.add("hidden");
-        await navigate({ view: "playlist", playlistId: res.playlist.id });
-      }
+      renderSpotifyImportReport(res);
+      showToast(
+        res.unmatchedCount > 0
+          ? `Imported ${res.tracksAdded}/${res.totalParsed} (${res.unmatchedCount} couldn't import)`
+          : `Created "${res.playlist?.name || "Playlist"}" (${res.tracksAdded} tracks)`,
+        res.unmatchedCount > 0 ? "info" : "success"
+      );
     } catch (err) {
       el.spotifyImportStatus.textContent = err.message;
       showToast(err.message, "error");
     } finally {
       el.spotifyImportBtn.disabled = false;
-      el.spotifyImportBtn.textContent = "Migrate Playlist";
+      el.spotifyImportBtn.textContent = "Smart Match & Import";
     }
   });
 

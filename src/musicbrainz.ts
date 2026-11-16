@@ -288,11 +288,36 @@ export function parseSpotifyPlaylistInput(rawText: string): ImportedTrackItem[] 
     }
   }
 
-  // 3. Plain text ("Artist - Song Title" lines)
+  // 3. Plain text ("Artist - Song Title", optional "| Album")
   const items: ImportedTrackItem[] = [];
   for (const rawLine of trimmed.split(/\r?\n/)) {
     const line = rawLine.replace(/^\d+[.)]\s*/, "").trim();
     if (!line) continue;
+    const pipeParts = line.split(/\s*\|\s*/).map((p) => p.trim()).filter(Boolean);
+    if (pipeParts.length >= 2) {
+      const mainPart = pipeParts[0]!;
+      const cleaned = cleanMessyTrackTitle(mainPart);
+      if (pipeParts.length >= 3) {
+        items.push({
+          title: pipeParts[0]!,
+          artist: pipeParts[1] || "Unknown Artist",
+          album: pipeParts[2] || null,
+          durationSec: null,
+          externalUrl: null,
+          coverUrl: null,
+        });
+      } else {
+        items.push({
+          title: cleaned.title,
+          artist: cleaned.artist || "Unknown Artist",
+          album: pipeParts[1] || null,
+          durationSec: null,
+          externalUrl: null,
+          coverUrl: null,
+        });
+      }
+      continue;
+    }
     const cleaned = cleanMessyTrackTitle(line);
     items.push({
       title: cleaned.title,

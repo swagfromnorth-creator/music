@@ -844,7 +844,7 @@
             <button type="button" class="underline-tab active" data-sync-tab="artistgrid">ArtistGrid</button>
             <button type="button" class="underline-tab" data-sync-tab="url">URL / Link</button>
             <button type="button" class="underline-tab" data-sync-tab="local">Local Folder</button>
-            <button type="button" class="underline-tab" data-sync-tab="spotify">Spotify Import</button>
+            <button type="button" class="underline-tab" data-sync-tab="spotify">Import Songs / Spotify</button>
           </div>
 
           <!-- Tab 1: ArtistGrid Tracker -->
@@ -929,24 +929,25 @@
             </form>
           </div>
 
-          <!-- Tab 4: Spotify CSV / JSON Playlist Migration -->
+          <!-- Tab 4: Smart Multi-Source Song & Playlist Importer -->
           <div id="syncTabSpotify" class="sync-tab-panel hidden">
             <p class="muted small">
-              Upload or paste an Exportify CSV, SpotDL JSON, or plain <code>Artist - Song</code> tracklist.
-              VaultStream matches your local library first and resolves missing tracks via YouTube Music or SoundCloud.
+              Paste a song list (<code>Artist - Song</code> or <code>Artist - Song | Album</code>), Exportify CSV, or SpotDL JSON.
+              VaultStream checks synced ArtistGrid trackers &amp; directory, YouTube Music, SoundCloud, and YouTube using title, artist, album, and duration metadata.
             </p>
             <form id="spotifyImportForm" class="sync-form-stack">
               <div class="two-col-row">
                 <label class="field-label">
                   <span>Playlist Name</span>
-                  <input id="spotifyPlaylistNameInput" type="text" placeholder="My Spotify Playlist" maxlength="100" />
+                  <input id="spotifyPlaylistNameInput" type="text" placeholder="My Imported Playlist" maxlength="100" />
                 </label>
                 <label class="field-label">
-                  <span>Fallback Source</span>
+                  <span>Source Priority</span>
                   <select id="spotifySourceSelect">
-                    <option value="ytmusic">YouTube Music</option>
-                    <option value="youtube">YouTube</option>
-                    <option value="soundcloud">SoundCloud</option>
+                    <option value="auto" selected>Smart Auto (All Sources)</option>
+                    <option value="ytmusic">YouTube Music First</option>
+                    <option value="soundcloud">SoundCloud First</option>
+                    <option value="youtube">YouTube First</option>
                   </select>
                 </label>
               </div>
@@ -955,20 +956,21 @@
                   <span>Load CSV / JSON file</span>
                   <input id="spotifyFileInput" type="file" accept=".csv,.json,.txt" class="hidden" />
                 </label>
-                <span class="muted small">or paste playlist contents below (up to 100 tracks)</span>
+                <span class="muted small">or paste songs / CSV below (up to 100 tracks)</span>
               </div>
               <textarea
                 id="spotifyContentInput"
                 class="import-textarea"
-                rows="6"
-                placeholder="Track Name,Artist Name,Album Name&#10;Nights,Frank Ocean,Blonde"
+                rows="5"
+                placeholder="Frank Ocean - Nights | Blonde&#10;Playboi Carti - Molly&#10;Track Name,Artist Name,Album Name"
                 required
               ></textarea>
               <div id="spotifyImportStatus" class="muted small hidden"></div>
               <div class="modal-footer-actions">
-                <button type="submit" id="spotifyImportBtn" class="btn btn-accent">Migrate Playlist</button>
+                <button type="submit" id="spotifyImportBtn" class="btn btn-accent">Smart Match &amp; Import</button>
               </div>
             </form>
+            <div id="spotifyImportReport" class="import-report hidden"></div>
           </div>
         </div>
       </div>

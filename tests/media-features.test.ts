@@ -10,6 +10,7 @@ import { findFfmpegExecutable, isCollectionUrl, remuxStreamToFile } from "../src
 import { cleanMessyTrackTitle, lookupMusicBrainzMetadata, parseSpotifyPlaylistInput } from "../src/musicbrainz.ts";
 import { detectHost, resolveHostUrl } from "../src/resolver.ts";
 import { createAppServer, type AppContext } from "../src/server.ts";
+import { scoreTrackCandidate } from "../src/smart-matcher.ts";
 import { curateTrackerResult, normalizeTrackerPayload } from "../src/tracker.ts";
 
 describe("media extraction, local scanner, MusicBrainz normalization & Spotify migration", () => {
@@ -458,5 +459,191 @@ describe("media extraction, local scanner, MusicBrainz normalization & Spotify m
     } finally {
       db.close();
     }
+  });
+
+  it("smart-imports songs across ArtistGrid directory, YT Music, SoundCloud & YouTube via metadata and reports unmatched songs", async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vaultstream-smart-import-"));
+
+    // Verify metadata scoring penalizes slowed/type-beat uploads and boosts album+duration matches
+    const realHit = scoreTrackCandidate(
+      { title: "Nights", artist: "Frank Ocean", album: "Blonde", durationSec: 307 },
+      { title: "Nights", artist: "Frank Ocean", albumOrEra: "Blonde", durationSec: 307, source: "ytmusic" }
+    );
+    const slowedHit = scoreTrackCandidate(
+      { title: "Nights", artist: "Frank Ocean", album: "Blonde", durationSec: 307 },
+      { title: "Nights (Slowed + Reverb) 1 Hour", artist: "Random Uploader", albumOrEra: null, durationSec: 900, source: "youtube" }
+    );
+    assert.ok(realHit.score > 80);
+    assert.ok(slowedHit.score < 50);
+
+    let trackerSyncCalls = 0;
+    ctx = createAppServer({
+      dbPath: path.join(tmpDir, "test.db"),
+      cacheDir: path.join(tmpDir, "cache"),
+      fetchDirectoryImpl: async () => [
+        {
+          name: "Kanye West",
+          trackerId: "kanye_grid_tracker_id_1234567890",
+          url: "https://artistgrid.cx/tracker/kanye_grid_tracker_id_1234567890",
+          isLinkWorking: true,
+          isUpdated: true,
+          isStarred: true,
+        },
+      ],
+      syncTrackerImpl: async (trackerId) => {
+        trackerSyncCalls++;
+        return {
+          tracker: {
+            trackerId,
+            name: "Kanye West Tracker",
+            artistName: "Kanye West",
+            currentTab: "Unreleased",
+            tabs: [{ name: "Unreleased", slug: "unreleased", gid: "0" }],
+            trackCount: 1,
+            playableCount: 1,
+            credits: null,
+          },
+          tracks: [
+            {
+              id: "ag_can_u_be",
+              trackerId,
+              tabName: "Unreleased",
+              title: "Can U Be",
+              rawName: "Can U Be",
+              credits: "",
+              artist: "Kanye West",
+              era: "Turbo Grafx 16",
+              subEra: "Default",
+              eraOrder: 0,
+              trackOrder: 0,
+              eraColor: "#7c3aed",
+              eraTextColor: "#ffffff",
+              eraImage: null,
+              notes: "Leaked session",
+              quality: "Lossless",
+              formatHint: "flac",
+              trackLength: "3:45",
+              availableLength: null,
+              leakDate: null,
+              fileDate: null,
+              trackType: "Leak",
+              primaryUrl: "https://pillows.su/f/1234567890abcdef1234567890abcdef",
+              primaryHost: "pillows",
+              links: [
+                {
+                  url: "https://pillows.su/f/1234567890abcdef1234567890abcdef",
+                  host: "pillows",
+                  playable: true,
+                  formatHint: "flac",
+                },
+              ],
+              resolvedUrl: null,
+              resolvedMime: null,
+              resolvedSize: null,
+              resolvedFilename: null,
+              resolvedAt: null,
+              isPlayable: true,
+              audioMeta: null,
+            },
+          ],
+          erasCount: 1,
+        };
+      },
+      searchOnlineImpl: async (query, source) => {
+        const q = query.toLowerCase();
+        if (q.includes("nights") && source === "ytmusic") {
+          return [
+            {
+              id: "ytm_slow",
+              source: "ytmusic",
+              url: "https://www.youtube.com/watch?v=slowed1",
+              title: "Nights (Slowed + Reverb)",
+              artist: "LoFi Channel",
+              album: null,
+              durationSec: 420,
+              durationText: "7:00",
+              thumbnail: null,
+            },
+            {
+              id: "ytm_real",
+              source: "ytmusic",
+              url: "https://www.youtube.com/watch?v=realNights",
+              title: "Nights",
+              artist: "Frank Ocean",
+              album: "Blonde",
+              durationSec: 307,
+              durationText: "5:07",
+              thumbnail: "https://example.com/blonde.jpg",
+            },
+          ];
+        }
+        if (q.includes("skyfall") && source === "soundcloud") {
+          return [
+            {
+              id: "sc_skyfall",
+              source: "soundcloud",
+              url: "https://soundcloud.com/travisscott/skyfall",
+              title: "Skyfall (feat. Young Thug)",
+              artist: "Travis Scott",
+              album: "Days Before Rodeo",
+              durationSec: 319,
+              durationText: "5:19",
+              thumbnail: null,
+            },
+          ];
+        }
+        return [];
+      },
+    });
+
+    await new Promise<void>((resolve) => ctx!.server.listen(0, "127.0.0.1", resolve));
+    const addr = ctx.server.address() as { port: number };
+    const base = `http://127.0.0.1:${addr.port}`;
+
+    const csvInput = [
+      "Track Name,Artist Name,Album Name,Duration (ms)",
+      "Can U Be,Kanye West,Turbo Grafx 16,225000",
+      "Nights,Frank Ocean,Blonde,307000",
+      "Skyfall,Travis Scott,Days Before Rodeo,319000",
+      "Totally Nonexistent Unfindable Track 999,Unknown Ghost,Lost Era,",
+    ].join("\n");
+
+    const res = await fetch(`${base}/api/import/spotify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        playlistName: "Smart Test Import",
+        content: csvInput,
+        sourcePreference: "auto",
+      }),
+    });
+    assert.equal(res.status, 200);
+    const json = (await res.json()) as {
+      totalParsed: number;
+      tracksAdded: number;
+      unmatchedCount: number;
+      unmatched: Array<{ title: string; artist: string; album: string | null; sourcesChecked: string[] }>;
+      sourceBreakdown: { artistgrid: number; ytmusic: number; soundcloud: number; youtube: number };
+      autoSyncedTrackers: string[];
+      matchedItems: Array<{ matchedTitle: string; matchedSource: string }>;
+    };
+
+    assert.equal(trackerSyncCalls, 1);
+    assert.equal(json.totalParsed, 4);
+    assert.equal(json.tracksAdded, 3);
+    assert.equal(json.sourceBreakdown.artistgrid, 1);
+    assert.equal(json.sourceBreakdown.ytmusic, 1);
+    assert.equal(json.sourceBreakdown.soundcloud, 1);
+    assert.equal(json.autoSyncedTrackers.length, 1);
+
+    const ytmMatch = json.matchedItems.find((m) => m.matchedSource === "ytmusic");
+    assert.equal(ytmMatch?.matchedTitle, "Nights");
+
+    assert.equal(json.unmatchedCount, 1);
+    assert.equal(json.unmatched[0]?.title, "Totally Nonexistent Unfindable Track 999");
+    assert.ok(json.unmatched[0]?.sourcesChecked.includes("artistgrid"));
+    assert.ok(json.unmatched[0]?.sourcesChecked.includes("ytmusic"));
+    assert.ok(json.unmatched[0]?.sourcesChecked.includes("soundcloud"));
+    assert.ok(json.unmatched[0]?.sourcesChecked.includes("youtube"));
   });
 });

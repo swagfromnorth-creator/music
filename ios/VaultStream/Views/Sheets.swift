@@ -249,8 +249,11 @@ struct SyncAndImportSheet: View {
     @State private var trackerInput = ""
     @State private var directoryFilter = ""
     @State private var mediaUrlInput = ""
-    @State private var spotifyName = "My Spotify Migration"
+    @State private var spotifyName = "My Imported Playlist"
     @State private var spotifyContent = ""
+    @State private var sourcePriority = "auto"
+    @State private var importProgressText: String?
+    @State private var importReport: SmartBatchImportReport?
     @State private var statusText: String?
     @State private var isBusy = false
 
@@ -267,7 +270,7 @@ struct SyncAndImportSheet: View {
                 Picker("Import Type", selection: $mode) {
                     Text("ArtistGrid").tag(0)
                     Text("URL / Playlist").tag(1)
-                    Text("Spotify CSV").tag(2)
+                    Text("Songs / Spotify").tag(2)
                 }
                 .pickerStyle(.segmented)
                 .listRowBackground(Color.clear)
@@ -338,19 +341,101 @@ struct SyncAndImportSheet: View {
                     }
                     .listRowBackground(Theme.surface)
                 } else {
-                    Section("Spotify Playlist / Exportify CSV") {
+                    Section("Songs, Artist - Title | Album, or Spotify CSV") {
                         TextField("Playlist Name", text: $spotifyName)
+                        Picker("Source Priority", selection: $sourcePriority) {
+                            Text("Smart Auto (All Sources)").tag("auto")
+                            Text("YouTube Music First").tag("ytmusic")
+                            Text("SoundCloud First").tag("soundcloud")
+                            Text("YouTube First").tag("youtube")
+                        }
                         TextEditor(text: $spotifyContent)
                             .frame(minHeight: 110)
 
                         Button {
                             Task { await importSpotify() }
                         } label: {
-                            if isBusy { ProgressView() } else { Text("Match on YT Music & Save") }
+                            if isBusy {
+                                HStack(spacing: 8) {
+                                    ProgressView()
+                                    Text(importProgressText ?? "Matching across ArtistGrid & streaming...")
+                                        .font(.caption)
+                                }
+                            } else {
+                                Text("Smart Match & Import")
+                            }
                         }
                         .disabled(spotifyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isBusy)
                     }
                     .listRowBackground(Theme.surface)
+
+                    if let report = importReport {
+                        Section("Import Summary") {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Imported \(report.tracksAdded) of \(report.totalParsed) song(s)")
+                                    .font(.subheadline.weight(.bold))
+                                    .foregroundStyle(Theme.accent)
+
+                                Text("ArtistGrid: \(report.artistgridCount) • Library: \(report.libraryCount) • YT Music: \(report.ytmusicCount) • SoundCloud: \(report.soundcloudCount) • YouTube: \(report.youtubeCount)")
+                                    .font(.caption2)
+                                    .foregroundStyle(Theme.textSecondary)
+
+                                if !report.autoSyncedTrackers.isEmpty {
+                                    Text("Auto-checked ArtistGrid: \(report.autoSyncedTrackers.joined(separator: ", "))")
+                                        .font(.caption2)
+                                        .foregroundStyle(Theme.accent)
+                                }
+                            }
+                        }
+                        .listRowBackground(Theme.surface)
+
+                        if !report.unmatched.isEmpty {
+                            Section("Couldn't Be Imported (\(report.unmatched.count))") {
+                                ForEach(report.unmatched) { item in
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Text("\(item.title) — \(item.artist)\(item.album.map { " (\($0))" } ?? "")")
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundStyle(Theme.danger)
+
+                                        Text(item.reason)
+                                            .font(.caption2)
+                                            .foregroundStyle(Theme.textSecondary)
+
+                                        if let closest = item.bestPartialCandidate {
+                                            Button("Use Closest (\(closest.source.rawValue)): \(closest.title)") {
+                                                Task {
+                                                    await useClosestCandidate(item: item, closest: closest, playlistId: report.playlist?.id)
+                                                }
+                                            }
+                                            .buttonStyle(.bordered)
+                                            .controlSize(.mini)
+                                        }
+                                    }
+                                    .padding(.vertical, 4)
+                                }
+                            }
+                            .listRowBackground(Theme.danger.opacity(0.08))
+                        }
+
+                        if !report.matchedItems.isEmpty {
+                            Section("Matched Details (\(report.matchedItems.count))") {
+                                DisclosureGroup("View Source & Metadata Matches") {
+                                    ForEach(report.matchedItems) { m in
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("\(m.matchedTitle) — \(m.matchedArtist)")
+                                                .font(.caption.weight(.semibold))
+                                                .foregroundStyle(Theme.textPrimary)
+                                            Text("\(m.matchedSource.rawValue) • \(m.matchReason)")
+                                                .font(.caption2)
+                                                .foregroundStyle(Theme.textSecondary)
+                                        }
+                                        .padding(.vertical, 2)
+                                    }
+                                }
+                            }
+                            .listRowBackground(Theme.surface)
+                        }
+                    }
                 }
 
                 if let statusText {
@@ -405,9 +490,43 @@ struct SyncAndImportSheet: View {
 
     private func importSpotify() async {
         isBusy = true
-        defer { isBusy = false }
-        let res = await library.importSpotify(name: spotifyName, content: spotifyContent)
-        statusText = "Matched \(res.matched)/\(res.total) tracks into \"\(spotifyName)\""
+        importReport = nil
+        importProgressText = "Preparing metadata..."
+        defer {
+            isBusy = false
+            importProgressText = nil
+        }
+        let report = await SmartMatcherService.shared.importSongsSmart(
+            playlistName: spotifyName,
+            content: spotifyContent,
+            sourcePriority: sourcePriority
+        ) { current, total, title in
+            importProgressText = "Checking \(current)/\(total): \(title)"
+        }
+        importReport = report
+        statusText = report.unmatched.isEmpty
+            ? "Imported all \(report.tracksAdded)/\(report.totalParsed) tracks into \"\(spotifyName)\""
+            : "Imported \(report.tracksAdded)/\(report.totalParsed) — \(report.unmatched.count) couldn't be imported (listed below)"
+    }
+
+    private func useClosestCandidate(item: SmartUnmatchedItem, closest: SmartPartialCandidate, playlistId: String?) async {
+        let host = closest.source == .soundcloud ? "soundcloud" : "youtube"
+        let saved = library.upsertOnlineTrack(
+            sourceUrl: closest.url,
+            title: item.title,
+            artist: item.artist,
+            album: item.album ?? closest.album,
+            host: host
+        )
+        if let playlistId {
+            _ = library.addTrack(saved, toPlaylist: playlistId)
+        }
+        if var rep = importReport {
+            rep.unmatched.removeAll { $0.id == item.id }
+            rep.tracksAdded += 1
+            importReport = rep
+        }
+        library.showToast("Added closest match for \"\(item.title)\"")
     }
 }
 

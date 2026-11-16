@@ -147,7 +147,18 @@ final class MetadataService: @unchecked Sendable {
         }
 
         return lines.compactMap { line in
-            let parsed = cleanTitleAndArtist(rawTitle: line)
+            let cleanedLine = line.replacingOccurrences(of: #"^\d+[.)]\s*"#, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanedLine.isEmpty else { return nil }
+            let pipeParts = cleanedLine.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            if pipeParts.count >= 2 {
+                if pipeParts.count >= 3 {
+                    return SpotifyTrackInput(title: pipeParts[0], artist: pipeParts[1], album: pipeParts[2])
+                }
+                let parsed = cleanTitleAndArtist(rawTitle: pipeParts[0])
+                return SpotifyTrackInput(title: parsed.title, artist: parsed.artist, album: pipeParts[1])
+            }
+            let parsed = cleanTitleAndArtist(rawTitle: cleanedLine)
             return SpotifyTrackInput(title: parsed.title, artist: parsed.artist, album: nil)
         }
     }

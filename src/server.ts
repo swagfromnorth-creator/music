@@ -33,6 +33,7 @@ import {
   parseSpotifyPlaylistInput,
 } from "./musicbrainz.ts";
 import { detectHost, resolveHostUrl, type FetchLike } from "./resolver.ts";
+import { runSmartMultiSourceImport } from "./smart-matcher.ts";
 import { fetchArtTabCovers, fetchDirectoryArtists, fetchTrackerFromArtistGrid } from "./tracker.ts";
 import { applyGitUpdate, checkForUpdates, getCurrentCommit } from "./updater.ts";
 import type { DirectoryArtist, HostKind, HostResolution, SyncResult, TrackRecord, UserProfile } from "./types.ts";
@@ -83,29 +84,6 @@ function fileUrlToLocalPath(urlOrPath: string): string {
     return stripped.slice(1);
   }
   return stripped;
-}
-
-function normalizeMatchText(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/\([^)]*\)|\[[^\]]*\]/g, " ")
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function isStrongLocalTrackMatch(candidate: TrackRecord, targetTitle: string, targetArtist: string): boolean {
-  const cTitle = normalizeMatchText(candidate.title);
-  const tTitle = normalizeMatchText(targetTitle);
-  if (!cTitle || !tTitle) return false;
-  const titleMatch = cTitle === tTitle || cTitle.includes(tTitle) || tTitle.includes(cTitle);
-  if (!titleMatch) return false;
-  const tArtist = normalizeMatchText(targetArtist);
-  if (!tArtist || tArtist === "unknown artist") return true;
-  const cArtist = normalizeMatchText(`${candidate.artist} ${candidate.credits}`);
-  return tArtist
-    .split(" ")
-    .some((tok) => tok.length >= 2 && cArtist.includes(tok));
 }
 
 function buildImportedTrackRecord(input: {
@@ -197,6 +175,9 @@ export function createAppServer(options: {
   fetchImpl?: FetchLike;
   publicDir?: string;
   initialCommit?: string | null;
+  searchOnlineImpl?: typeof searchOnlineMedia;
+  fetchDirectoryImpl?: () => Promise<DirectoryArtist[]>;
+  syncTrackerImpl?: (input: string) => Promise<ReturnType<typeof fetchTrackerFromArtistGrid> extends Promise<infer R> ? R : never>;
 } = {}): AppContext {
   const dbPath = options.dbPath ?? DB_PATH;
   const db = new AppDatabase(dbPath);
@@ -225,6 +206,17 @@ export function createAppServer(options: {
   let lastAutoUpdateError: string | null = null;
   let directoryCache: { fetchedAt: number; artists: DirectoryArtist[] } | null = null;
   const resolvedHeadersCache = new Map<string, Record<string, string>>();
+
+  async function getCachedDirectoryArtists(): Promise<DirectoryArtist[]> {
+    const now = Date.now();
+    if (!directoryCache || now - directoryCache.fetchedAt > 1000 * 60 * 30) {
+      const artists = options.fetchDirectoryImpl
+        ? await options.fetchDirectoryImpl()
+        : await fetchDirectoryArtists(rawFetchImpl);
+      directoryCache = { fetchedAt: now, artists };
+    }
+    return directoryCache.artists;
+  }
 
   async function resolveTrackLink(
     track: TrackRecord,
@@ -667,17 +659,13 @@ export function createAppServer(options: {
 
       // ArtistGrid Directory
       if (method === "GET" && pathname === "/api/directory") {
-        const now = Date.now();
-        if (!directoryCache || now - directoryCache.fetchedAt > 1000 * 60 * 30) {
-          const artists = await fetchDirectoryArtists(rawFetchImpl);
-          directoryCache = { fetchedAt: now, artists };
-        }
+        const allArtists = await getCachedDirectoryArtists();
         const q = (parsedUrl.searchParams.get("q") ?? "").trim().toLowerCase();
         const filtered = q
-          ? directoryCache.artists.filter((a) => a.name.toLowerCase().includes(q))
-          : directoryCache.artists;
+          ? allArtists.filter((a) => a.name.toLowerCase().includes(q))
+          : allArtists;
         sendJson(res, 200, {
-          total: directoryCache.artists.length,
+          total: allArtists.length,
           artists: filtered.slice(0, 100),
         });
         return;
@@ -1320,12 +1308,12 @@ export function createAppServer(options: {
         return;
       }
 
-      // Spotify CSV/JSON playlist migration into VaultStream library + playlist
+      // Smart multi-source song/playlist importer (ArtistGrid Directory + Local + YT Music + SoundCloud + YouTube)
       if (method === "POST" && pathname === "/api/import/spotify") {
         const body = await readJsonBody<{
           content?: string;
           playlistName?: string;
-          sourcePreference?: "ytmusic" | "youtube" | "soundcloud";
+          sourcePreference?: "auto" | "ytmusic" | "youtube" | "soundcloud";
           resolveOnline?: boolean;
           createPlaylist?: boolean;
         }>(req);
@@ -1342,121 +1330,118 @@ export function createAppServer(options: {
           return;
         }
 
-        const playlistName = (body.playlistName?.trim() || "Spotify Import").slice(0, 100);
+        const playlistName = (body.playlistName?.trim() || "Imported Playlist").slice(0, 100);
         const sourcePref =
-          body.sourcePreference === "youtube" || body.sourcePreference === "soundcloud"
+          body.sourcePreference === "ytmusic" ||
+          body.sourcePreference === "youtube" ||
+          body.sourcePreference === "soundcloud"
             ? body.sourcePreference
-            : "ytmusic";
+            : "auto";
         const resolveOnline = body.resolveOnline !== false;
         const maxTracks = parsedItems.slice(0, 100);
 
-        const matchedTrackIds: string[] = [];
-        const unmatched: Array<{ title: string; artist: string }> = [];
-        let matchedLocal = 0;
-        let matchedOnline = 0;
+        const searchOnlineFn = options.searchOnlineImpl ?? searchOnlineMedia;
+        const syncTrackerFn =
+          options.syncTrackerImpl ??
+          ((trackerInput: string) =>
+            fetchTrackerFromArtistGrid(trackerInput, { fetchImpl: rawFetchImpl }));
 
-        for (let idx = 0; idx < maxTracks.length; idx++) {
-          const item = maxTracks[idx]!;
-          const searchQ = `${item.title} ${item.artist !== "Unknown Artist" ? item.artist : ""}`.trim();
-          const localCandidates = db.searchTracks({ q: searchQ, playableOnly: true, limit: 8 }).tracks;
-          const localHit = localCandidates.find((c) => isStrongLocalTrackMatch(c, item.title, item.artist));
-
-          if (localHit) {
-            matchedTrackIds.push(localHit.id);
-            matchedLocal++;
-            continue;
-          }
-
-          if (!resolveOnline) {
-            unmatched.push({ title: item.title, artist: item.artist });
-            continue;
-          }
-
-          let chosenUrl =
-            item.externalUrl && detectHost(item.externalUrl) !== "unknown" ? item.externalUrl : null;
-          let host: HostKind = chosenUrl ? detectHost(chosenUrl) : "youtube";
-          let thumb = item.coverUrl;
-          let durSec = item.durationSec;
-
-          if (!chosenUrl) {
-            try {
-              const onlineHits = await searchOnlineMedia(
-                `${item.artist !== "Unknown Artist" ? `${item.artist} - ` : ""}${item.title}`,
-                sourcePref,
-                1
-              );
-              if (onlineHits[0]) {
-                chosenUrl = onlineHits[0].url;
-                host = sourcePref === "soundcloud" ? "soundcloud" : "youtube";
-                thumb = thumb || onlineHits[0].thumbnail;
-                durSec = durSec ?? onlineHits[0].durationSec;
-              }
-            } catch {
-              // treat as unmatched if search fails
-            }
-          }
-
-          if (!chosenUrl) {
-            unmatched.push({ title: item.title, artist: item.artist });
-            continue;
-          }
-
-          const imported = buildImportedTrackRecord({
-            idPrefix: "spf_",
-            trackerId: "spotify_imports",
-            tabName: playlistName,
-            sourceUrl: chosenUrl,
-            title: item.title,
-            artist: item.artist,
-            album: item.album,
-            thumbnail: thumb,
-            durationSec: durSec,
-            year: null,
-            host,
-            notes: `Migrated from Spotify playlist "${playlistName}"`,
-            trackOrder: idx,
-          });
-
-          const saved = db.upsertImportedTrack(
-            {
-              trackerId: "spotify_imports",
-              name: "Spotify Migrations",
-              artistName: "Spotify Imports",
-              tabName: playlistName,
+        const smartResult = await runSmartMultiSourceImport(
+          maxTracks,
+          { sourcePreference: sourcePref, resolveOnline },
+          {
+            searchLocalTracks: ({ q, trackerId, limit }) =>
+              db.searchTracks({ q, trackerId, playableOnly: true, limit: limit ?? 12 }).tracks,
+            listTrackers: () => db.listTrackers(),
+            getDirectory: () => getCachedDirectoryArtists(),
+            syncArtistGridTracker: async (trackerId) => {
+              const normalized = await syncTrackerFn(trackerId);
+              const tracker = db.upsertSyncedTracker(normalized.tracker, normalized.tracks);
+              return { tracker, tracksSynced: normalized.tracks.length };
             },
-            imported
-          );
-          matchedTrackIds.push(saved.id);
-          matchedOnline++;
-        }
+            searchOnline: searchOnlineFn,
+            saveOnlineTrack: ({ item, chosenUrl, host, thumbnail, durationSec, order, matchedVia, matchReason }) => {
+              const imported = buildImportedTrackRecord({
+                idPrefix: "spf_",
+                trackerId: "spotify_imports",
+                tabName: playlistName,
+                sourceUrl: chosenUrl,
+                title: item.title,
+                artist: item.artist,
+                album: item.album,
+                thumbnail,
+                durationSec,
+                year: null,
+                host,
+                notes: `Imported for "${playlistName}" via ${matchedVia}: ${matchReason}`,
+                trackOrder: order,
+              });
+              return db.upsertImportedTrack(
+                {
+                  trackerId: "spotify_imports",
+                  name: "Spotify & Web Imports",
+                  artistName: "Imported Playlists",
+                  tabName: playlistName,
+                },
+                imported
+              );
+            },
+          }
+        );
 
         let playlist = null;
+        let addedCount = 0;
+        const duplicateSkipped: Array<{ title: string; artist: string; reason: string }> = [];
+
         if (body.createPlaylist !== false) {
           playlist = db.createPlaylist({
             name: playlistName,
-            description: `Imported ${matchedTrackIds.length}/${parsedItems.length} tracks (${matchedLocal} local, ${matchedOnline} online)`,
+            description: `Imported ${smartResult.matchedTracks.length}/${parsedItems.length} tracks (${smartResult.unmatched.length} unavailable/unmatched)`,
           });
-          for (const tid of matchedTrackIds) {
-            db.addTrackToPlaylist(playlist.id, tid);
+          for (const entry of smartResult.matchedTracks) {
+            const added = db.addTrackToPlaylist(playlist.id, entry.track.id);
+            if (added) {
+              addedCount++;
+            } else {
+              entry.detail.isDuplicateInPlaylist = true;
+              duplicateSkipped.push({
+                title: entry.detail.inputTitle,
+                artist: entry.detail.inputArtist,
+                reason: "Same song & version already included in this playlist.",
+              });
+            }
           }
           playlist = db.getPlaylistDetail(playlist.id);
+        } else {
+          addedCount = smartResult.matchedTracks.length;
         }
+
+        const sb = smartResult.sourceBreakdown;
+        const matchedLocal = sb.artistgrid + sb.library;
+        const matchedOnline = sb.ytmusic + sb.soundcloud + sb.youtube + sb.direct;
 
         db.addActivity(
           "playlist",
           `Imported "${playlistName}"`,
-          `${matchedTrackIds.length}/${parsedItems.length} tracks matched (${matchedLocal} local, ${matchedOnline} online)`
+          `${addedCount}/${parsedItems.length} imported · ${sb.artistgrid} ArtistGrid, ${sb.ytmusic} YT Music, ${sb.soundcloud} SoundCloud, ${sb.youtube} YouTube${smartResult.unmatched.length > 0 ? ` · ${smartResult.unmatched.length} couldn't import` : ""}`
         );
 
         sendJson(res, 200, {
           playlist,
           totalParsed: parsedItems.length,
           processedCount: maxTracks.length,
-          tracksAdded: matchedTrackIds.length,
+          tracksAdded: addedCount,
+          matchedCount: smartResult.matchedTracks.length,
           matchedLocal,
+          matchedArtistGrid: sb.artistgrid,
           matchedOnline,
-          unmatchedCount: unmatched.length,
-          unmatched,
+          sourceBreakdown: sb,
+          autoSyncedTrackers: smartResult.autoSyncedTrackers,
+          matchedItems: smartResult.matchedTracks.map((m) => m.detail),
+          duplicateSkippedCount: duplicateSkipped.length,
+          duplicateSkipped,
+          unmatchedCount: smartResult.unmatched.length,
+          unmatched: smartResult.unmatched,
         });
         return;
       }

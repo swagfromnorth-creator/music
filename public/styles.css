@@ -3320,3 +3320,81 @@ body {
   0%, 100% { opacity: 0.65; }
   50% { opacity: 1; }
 }
+
+.import-report {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.import-summary-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.import-chip {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-soft);
+}
+
+.import-chip.ok {
+  background: rgba(16, 185, 129, 0.16);
+  color: #6ee7b7;
+}
+
+.import-chip.fail {
+  background: rgba(239, 68, 68, 0.18);
+  color: #fca5a5;
+}
+
+.import-unmatched-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+}
+
+.import-unmatched-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.import-unmatched-row:first-of-type {
+  border-top: none;
+  padding-top: 2px;
+}
+
+.import-matched-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.import-matched-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
