@@ -1,0 +1,17 @@
+{
+  "name": "unreleased-lossless-player",
+  "version": "0.1.0",
+  "description": "Local PC prototype for indexing ArtistGrid trackers in SQLite FTS5, resolving host links, and streaming lossless audio with progressive LRU disk caching.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node src/server.ts",
+    "dev": "node --watch src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  }
+}
