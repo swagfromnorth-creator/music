@@ -16,16 +16,23 @@ Lightweight local Node.js + TypeScript proof-of-concept validating:
 ## Requirements
 - **Node.js v24+** (uses built-in `node:sqlite` with FTS5 and native TypeScript type stripping)
 
-## Run Locally
-Double-click **`start.bat`** (auto-pulls updates from GitHub and opens **http://127.0.0.1:3456**), or run manually:
+## Run Locally (Windows `.exe` or CLI)
+Double-click **`VaultStream.exe`** (native Windows app launcher + system tray with no console window) or **`start.bat`**, or run manually:
 ```bash
 npm install
 npm start
 ```
 Then open **http://127.0.0.1:3456** in your browser.
 
-### Automatic GitHub Updates
-- While running, VaultStream automatically checks `origin/main` every 20 seconds (`AUTO_UPDATE_INTERVAL_MS`, set `AUTO_UPDATE=0` to disable), pulls new commits via `git pull --rebase --autostash`, restarts automatically if backend files changed, and refreshes the browser UI cleanly.
+To rebuild **`VaultStream.exe`** from source (`desktop/VaultStream.cs`):
+```bash
+npm run build:exe
+```
+
+### Automatic GitHub Updates (Works inside `VaultStream.exe`!)
+- Because `VaultStream.exe` supervises the live local Git repo instead of freezing source files inside the binary, updates pushed by `arena.ai` or collaborators continue auto-applying without rebuilding the `.exe`.
+- On launch, `VaultStream.exe` pulls the latest `origin/main` commits automatically, opens a standalone Edge/Chrome app window, and runs the server with `VAULTSTREAM_SUPERVISED=1`.
+- While running, VaultStream automatically checks `origin/main` every 20 seconds (`AUTO_UPDATE_INTERVAL_MS`, set `AUTO_UPDATE=0` to disable), pulls new commits via `git pull --rebase --autostash`, restarts automatically if backend files changed, and refreshes the app UI cleanly.
 - You can also run **`Pull-From-GitHub.bat`** or **`Push-To-GitHub.bat`** manually at any time.
 
 ### Environment Variables (Optional)

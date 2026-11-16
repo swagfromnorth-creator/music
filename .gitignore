@@ -3,3 +3,4 @@ data/
 cache/
 *.db-wal
 *.db-shm
+VaultStream.exe
