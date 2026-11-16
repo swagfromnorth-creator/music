@@ -17,6 +17,8 @@ import { buildDemoSeedPayload, createDemoAudioResponse, renderDemoArtSvg } from 
 import { ImageProxyCache } from "./images.ts";
 import { LOCAL_LIBRARY_TRACKER_ID, scanLocalMusicFolder } from "./local-library.ts";
 import {
+  findFfmpegExecutable,
+  findYtDlpExecutable,
   formatDurationSeconds,
   searchOnlineMedia,
   streamTranscodedAudio,
@@ -276,12 +278,18 @@ export function createAppServer(options: {
       };
     }
 
-    // Reuse fresh cached resolution if resolving primary link (and headers exist when needed)
+    // Reuse fresh cached resolution if resolving primary link (and headers/yt-dlp match)
+    const hasYtDlp = Boolean(findYtDlpExecutable());
+    const staleScMaidZone =
+      hasYtDlp &&
+      track.primaryHost === "soundcloud" &&
+      Boolean(track.resolvedUrl?.includes("sc.maid.zone"));
     const needsFreshYtHeaders =
-      track.primaryHost === "youtube" &&
+      (track.primaryHost === "youtube" || track.primaryHost === "soundcloud") &&
       Boolean(track.primaryUrl && !resolvedHeadersCache.has(track.primaryUrl));
     if (
       !opts.forceRefresh &&
+      !staleScMaidZone &&
       !needsFreshYtHeaders &&
       opts.linkIndex === undefined &&
       track.resolvedUrl &&
@@ -307,12 +315,9 @@ export function createAppServer(options: {
 
     let lastFailure: HostResolution | null = null;
     for (const link of candidateLinks) {
-      let resolved = await resolveHostUrl(link.url, rawFetchImpl);
-      if (!resolved.ok && link.host === "soundcloud") {
-        resolved = await resolveHostUrl(link.url, rawFetchImpl, {
-          preferYtDlpForSoundcloud: true,
-        });
-      }
+      const resolved = await resolveHostUrl(link.url, rawFetchImpl, {
+        preferYtDlpForSoundcloud: hasYtDlp,
+      });
       if (resolved.ok) {
         if (resolved.httpHeaders && Object.keys(resolved.httpHeaders).length > 0) {
           resolvedHeadersCache.set(link.url, resolved.httpHeaders);
@@ -554,7 +559,7 @@ export function createAppServer(options: {
           return;
         }
         const added = db.addTrackToPlaylist(playlistId, body.trackId);
-        sendJson(res, 200, { added, playlist: db.getPlaylistDetail(playlistId) });
+        sendJson(res, 200, { added, duplicateSong: !added, playlist: db.getPlaylistDetail(playlistId) });
         return;
       }
 
@@ -821,11 +826,45 @@ export function createAppServer(options: {
           return;
         }
 
+        // YouTube DASH (ftypdash) and SoundCloud HLS (.m3u8) cannot play natively in HTML5 <audio>;
+        // stream-copy into a seekable faststart M4A inside ./cache once (~0.5-1.5s) then serve via 206 ranges.
+        const needsFaststartRemux =
+          findFfmpegExecutable() &&
+          (resolution.host === "youtube" ||
+            resolution.host === "soundcloud" ||
+            /\.m3u8(?:$|\?)/i.test(resolution.resolvedUrl));
+
+        let activeResolvedUrl = resolution.resolvedUrl;
+        let activeHeaders = resolution.httpHeaders;
+
+        if (needsFaststartRemux && !(await cache.hasCleanCompleteCache(sourceUrl))) {
+          try {
+            await cache.remuxAndCacheStream({
+              trackId: track.id,
+              sourceUrl,
+              resolvedUrl: activeResolvedUrl,
+              upstreamHeaders: activeHeaders,
+            });
+          } catch {
+            const fresh = await resolveTrackLink(track, { linkIndex, forceRefresh: true });
+            if (fresh.resolution.ok) {
+              activeResolvedUrl = fresh.resolution.resolvedUrl;
+              activeHeaders = fresh.resolution.httpHeaders;
+              await cache.remuxAndCacheStream({
+                trackId: track.id,
+                sourceUrl,
+                resolvedUrl: activeResolvedUrl,
+                upstreamHeaders: activeHeaders,
+              });
+            }
+          }
+        }
+
         await cache.streamWithCache(req, res, {
           trackId: track.id,
           sourceUrl,
-          resolvedUrl: resolution.resolvedUrl,
-          upstreamHeaders: resolution.httpHeaders,
+          resolvedUrl: activeResolvedUrl,
+          upstreamHeaders: activeHeaders,
           onExpiredUpstream: async () => {
             const fresh = await resolveTrackLink(track, { linkIndex, forceRefresh: true });
             return fresh.resolution.ok
@@ -867,12 +906,24 @@ export function createAppServer(options: {
           });
           return;
         }
-        const entry = await cache.prefetchFullTrack({
-          trackId: track.id,
-          sourceUrl,
-          resolvedUrl: resolution.resolvedUrl,
-          upstreamHeaders: resolution.httpHeaders,
-        });
+        const useRemux =
+          Boolean(findFfmpegExecutable()) &&
+          (resolution.host === "youtube" ||
+            resolution.host === "soundcloud" ||
+            /\.m3u8(?:$|\?)/i.test(resolution.resolvedUrl));
+        const entry = useRemux
+          ? await cache.remuxAndCacheStream({
+              trackId: track.id,
+              sourceUrl,
+              resolvedUrl: resolution.resolvedUrl,
+              upstreamHeaders: resolution.httpHeaders,
+            })
+          : await cache.prefetchFullTrack({
+              trackId: track.id,
+              sourceUrl,
+              resolvedUrl: resolution.resolvedUrl,
+              upstreamHeaders: resolution.httpHeaders,
+            });
         db.addActivity(
           "cache",
           `Saved "${track.title}" offline`,

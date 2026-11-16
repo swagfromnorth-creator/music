@@ -6,7 +6,11 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { USER_AGENT } from "./config.ts";
 import type { AppDatabase } from "./db.ts";
-import { findFfprobeExecutable, probeAudioWithFfprobe } from "./media-tools.ts";
+import {
+  findFfprobeExecutable,
+  probeAudioWithFfprobe,
+  remuxStreamToFile,
+} from "./media-tools.ts";
 import { mimeToExtension, type FetchLike } from "./resolver.ts";
 import type { AudioHeaderInfo, ByteRange, CacheEntry, CacheStats } from "./types.ts";
 
@@ -233,8 +237,34 @@ function isNonAudioMime(mime: string | null): boolean {
     lower.startsWith("text/") ||
     lower === "application/json" ||
     lower === "application/xml" ||
+    lower === "application/vnd.apple.mpegurl" ||
+    lower === "application/x-mpegurl" ||
+    lower === "audio/mpegurl" ||
+    lower === "audio/x-mpegurl" ||
     lower.startsWith("image/")
   );
+}
+
+function isBrokenCachedFile(filePath: string): boolean {
+  try {
+    const fd = fs.openSync(filePath, "r");
+    try {
+      const buf = Buffer.allocUnsafe(16);
+      const n = fs.readSync(fd, buf, 0, 16, 0);
+      const head = buf.subarray(0, n).toString("ascii");
+      if (head.startsWith("#EXTM3U") || head.startsWith("<!DOC") || head.startsWith("<html")) {
+        return true;
+      }
+      if (n >= 12 && buf.subarray(4, 12).toString("ascii") === "ftypdash") {
+        return true;
+      }
+      return false;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
 }
 
 export class DiskCacheManager {
@@ -300,6 +330,12 @@ export class DiskCacheManager {
         const entry = this.db.getCacheEntry(d.name);
         if (!entry) {
           fs.rmSync(dirPath, { recursive: true, force: true });
+          continue;
+        }
+        const firstSeg = files.find((f) => /^0-\d+\.seg$/.test(f));
+        if (firstSeg && isBrokenCachedFile(path.join(dirPath, firstSeg))) {
+          fs.rmSync(dirPath, { recursive: true, force: true });
+          this.db.deleteCacheEntry(d.name);
         }
       }
       // Remove stale SQLite entries whose directory vanished
@@ -799,8 +835,14 @@ export class DiskCacheManager {
     try {
       let resolvedUrl = target.resolvedUrl;
       let upstreamHeaders = target.upstreamHeaders;
-      const entry = this.db.getCacheEntry(cacheKey);
-      const segments = await this.listSegments(cacheKey);
+      let entry = this.db.getCacheEntry(cacheKey);
+      let segments = await this.listSegments(cacheKey);
+      if (segments[0]?.start === 0 && isBrokenCachedFile(segments[0].filePath)) {
+        await fsp.rm(this.entryDir(cacheKey), { recursive: true, force: true }).catch(() => {});
+        this.db.deleteCacheEntry(cacheKey);
+        entry = null;
+        segments = [];
+      }
       const knownTotal = entry?.totalBytes ?? null;
 
       if (req.method === "HEAD") {
@@ -1200,10 +1242,89 @@ export class DiskCacheManager {
     const entry = this.db.getCacheEntry(cacheKey);
     if (!entry?.isComplete) return null;
     const segments = await this.listSegments(cacheKey);
-    if (segments.length === 1 && segments[0]?.start === 0) {
+    if (segments.length === 1 && segments[0]?.start === 0 && !isBrokenCachedFile(segments[0].filePath)) {
       return segments[0].filePath;
     }
     return null;
+  }
+
+  public async hasCleanCompleteCache(sourceUrl: string): Promise<boolean> {
+    return (await this.getCompleteCachedFile(sourceUrl)) !== null;
+  }
+
+  public async remuxAndCacheStream(target: {
+    trackId: string | null;
+    sourceUrl: string;
+    resolvedUrl: string;
+    upstreamHeaders?: Record<string, string>;
+  }): Promise<CacheEntry> {
+    const cacheKey = computeCacheKey(target.sourceUrl);
+    const existingPromise = this.activePrefetches.get(cacheKey);
+    if (existingPromise) return existingPromise;
+
+    const job = (async () => {
+      this.incrementActive(cacheKey);
+      try {
+        const cleanExisting = await this.getCompleteCachedFile(target.sourceUrl);
+        if (cleanExisting) {
+          const entry = this.db.getCacheEntry(cacheKey);
+          if (entry) {
+            this.db.touchCacheEntry(cacheKey);
+            return entry;
+          }
+        }
+
+        // Purge any broken prior segments (e.g. cached ftypdash or #EXTM3U)
+        await fsp.rm(this.entryDir(cacheKey), { recursive: true, force: true }).catch(() => {});
+        this.db.deleteCacheEntry(cacheKey);
+
+        const dir = this.entryDir(cacheKey);
+        await fsp.mkdir(dir, { recursive: true });
+        const tempPath = path.join(dir, `.tmp-remux-${crypto.randomUUID()}.seg`);
+
+        try {
+          const remuxInfo = await remuxStreamToFile(
+            target.resolvedUrl,
+            tempPath,
+            target.upstreamHeaders
+          );
+          const fh = await fsp.open(tempPath, "r");
+          let audioMeta: AudioHeaderInfo | null = null;
+          try {
+            const headBuf = Buffer.allocUnsafe(Math.min(4096, remuxInfo.sizeBytes));
+            const { bytesRead } = await fh.read(headBuf, 0, headBuf.length, 0);
+            audioMeta = parseAudioHeader(headBuf.subarray(0, bytesRead), remuxInfo.mimeType);
+          } finally {
+            await fh.close();
+          }
+
+          return await this.commitSegment(
+            cacheKey,
+            {
+              trackId: target.trackId,
+              sourceUrl: target.sourceUrl,
+              resolvedUrl: target.resolvedUrl,
+              mimeType: remuxInfo.mimeType,
+              filename: `remux.${remuxInfo.ext}`,
+              totalBytes: remuxInfo.sizeBytes,
+              audioMeta,
+            },
+            tempPath,
+            0,
+            remuxInfo.sizeBytes
+          );
+        } catch (err) {
+          await fsp.rm(tempPath, { force: true }).catch(() => {});
+          throw err;
+        }
+      } finally {
+        this.decrementActive(cacheKey);
+        this.activePrefetches.delete(cacheKey);
+      }
+    })();
+
+    this.activePrefetches.set(cacheKey, job);
+    return job;
   }
 
   public async prefetchFullTrack(target: {

@@ -13,6 +13,10 @@ import {
   rankLinks,
   type FetchLike,
 } from "./resolver.ts";
+import {
+  curateAndDeduplicateTracks,
+  isNonSongTab,
+} from "./song-identity.ts";
 import type {
   DirectoryArtist,
   TrackerRecord,
@@ -622,6 +626,42 @@ export function normalizeTrackerPayload(
   };
 }
 
+export function curateTrackerResult(result: {
+  tracker: Omit<TrackerRecord, "syncedTabs" | "lastSyncedAt">;
+  tracks: TrackRecord[];
+  erasCount: number;
+}): {
+  tracker: Omit<TrackerRecord, "syncedTabs" | "lastSyncedAt">;
+  tracks: TrackRecord[];
+  erasCount: number;
+} {
+  const curatedTracks = curateAndDeduplicateTracks(result.tracks);
+  const availableTracks = curatedTracks.filter((t) => t.tabName !== "Unavailable");
+  const hasUnavailable = curatedTracks.some((t) => t.tabName === "Unavailable");
+
+  const songTabs = result.tracker.tabs.filter((t) => !isNonSongTab(t.name));
+  if (hasUnavailable && !songTabs.some((t) => t.name === "Unavailable")) {
+    songTabs.push({ name: "Unavailable", slug: "unavailable", gid: "" });
+  }
+
+  const currentTab = isNonSongTab(result.tracker.currentTab)
+    ? (songTabs[0]?.name ?? "Unreleased")
+    : result.tracker.currentTab;
+  const erasSet = new Set(availableTracks.map((t) => t.era));
+
+  return {
+    tracker: {
+      ...result.tracker,
+      currentTab,
+      tabs: songTabs,
+      trackCount: availableTracks.length,
+      playableCount: availableTracks.filter((t) => t.isPlayable).length,
+    },
+    tracks: curatedTracks,
+    erasCount: erasSet.size,
+  };
+}
+
 export async function fetchTrackerFromArtistGrid(
   rawInput: string,
   options: { tabGid?: string; tabSlug?: string; tabName?: string; fetchImpl?: FetchLike } = {}
@@ -639,13 +679,31 @@ export async function fetchTrackerFromArtistGrid(
   const v3Url = `${ARTISTGRID_V3_API}${v3Path}`;
   const v3Res = await fetchImpl(v3Url, { headers: { "User-Agent": USER_AGENT } });
   if (v3Res.ok) {
-    const json = (await v3Res.json()) as V3Response;
-    const tabs: TrackerTabMeta[] = Array.isArray(json.tabs)
+    let json = (await v3Res.json()) as V3Response;
+    const allTabs: TrackerTabMeta[] = Array.isArray(json.tabs)
       ? json.tabs.map((t) => ({ name: t.name, slug: t.slug, gid: t.gid }))
       : [];
+
+    // If default tab is a non-song tab (e.g. Interviews/Art), switch to first real song tab
+    if (!options.tabGid && !options.tabSlug && isNonSongTab(json.tab?.name)) {
+      const firstSongTab = allTabs.find((t) => !isNonSongTab(t.name));
+      if (firstSongTab) {
+        const songUrl = firstSongTab.gid
+          ? `${ARTISTGRID_V3_API}/sh/${encodeURIComponent(trackerId)}/gid/${encodeURIComponent(firstSongTab.gid)}`
+          : `${ARTISTGRID_V3_API}/sh/${encodeURIComponent(trackerId)}/tab/${encodeURIComponent(firstSongTab.slug)}`;
+        const switched = await fetchImpl(songUrl, { headers: { "User-Agent": USER_AGENT } });
+        if (switched.ok) {
+          json = (await switched.json()) as V3Response;
+        }
+      }
+    }
+
+    const tabs: TrackerTabMeta[] = Array.isArray(json.tabs)
+      ? json.tabs.map((t) => ({ name: t.name, slug: t.slug, gid: t.gid }))
+      : allTabs;
     const isArtTab = options.tabSlug === "art" || /\bart\b/i.test(json.tab?.name || "");
     const artCovers = !isArtTab && tabs.length > 0 ? await fetchArtTabCovers(trackerId, tabs, fetchImpl) : undefined;
-    return normalizeTrackerPayload(trackerId, json, options.tabName, artCovers);
+    return curateTrackerResult(normalizeTrackerPayload(trackerId, json, options.tabName, artCovers));
   }
 
   // Fallback to legacy trackerapi-2 (trackerdl endpoint)
@@ -655,7 +713,7 @@ export async function fetchTrackerFromArtistGrid(
   const v2Res = await fetchImpl(v2Url, { headers: { "User-Agent": USER_AGENT } });
   if (v2Res.ok) {
     const json = await v2Res.json();
-    return normalizeTrackerPayload(trackerId, json, options.tabName);
+    return curateTrackerResult(normalizeTrackerPayload(trackerId, json, options.tabName));
   }
 
   throw new Error(

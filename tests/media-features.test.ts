@@ -3,11 +3,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
+import { AppDatabase } from "../src/db.ts";
 import { generateDemoWavBuffer } from "../src/demo.ts";
 import { LOCAL_LIBRARY_TRACKER_ID, scanLocalMusicFolder } from "../src/local-library.ts";
+import { findFfmpegExecutable, remuxStreamToFile } from "../src/media-tools.ts";
 import { cleanMessyTrackTitle, lookupMusicBrainzMetadata, parseSpotifyPlaylistInput } from "../src/musicbrainz.ts";
 import { detectHost, resolveHostUrl } from "../src/resolver.ts";
 import { createAppServer, type AppContext } from "../src/server.ts";
+import { curateTrackerResult, normalizeTrackerPayload } from "../src/tracker.ts";
 
 describe("media extraction, local scanner, MusicBrainz normalization & Spotify migration", () => {
   let ctx: AppContext | null = null;
@@ -277,5 +280,165 @@ describe("media extraction, local scanner, MusicBrainz normalization & Spotify m
     // Also verify scanLocalMusicFolder directly counts zero missing
     const directStats = await scanLocalMusicFolder(musicFolder, ctx.db, path.join(tmpDir, "images"));
     assert.equal(directStats.indexedTracks, 1);
+
+    // 5. Verify ffmpeg remux/transcode produces playable non-empty MP3/MP4 stream when available
+    if (findFfmpegExecutable()) {
+      const remuxOut = path.join(tmpDir, "remux-test.bin");
+      const rInfo = await remuxStreamToFile(wavPath, remuxOut);
+      assert.ok(rInfo.sizeBytes > 1024);
+      assert.ok(rInfo.mimeType === "audio/mp4" || rInfo.mimeType === "audio/mpeg");
+    }
+  });
+
+  it("curates trackers: removes non-songs and unplayable links, isolates unavailable songs, and blocks duplicate songs unless different versions", () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vaultstream-curate-test-"));
+    const db = new AppDatabase(path.join(tmpDir, "curate.db"));
+    try {
+
+    const v3Payload = {
+      name: "Test Artist Tracker",
+      tab: { name: "Unreleased", slug: "unreleased", gid: "1" },
+      tabs: [
+        { name: "Unreleased", slug: "unreleased", gid: "1" },
+        { name: "Interviews (CA)", slug: "interviews", gid: "2" },
+        { name: "🎨 Art", slug: "art", gid: "3" },
+      ],
+      eras: [
+        {
+          name: "Era One",
+          tracks: [
+            {
+              name: { raw: "Skyline", title: "Skyline" },
+              quality: "Lossless",
+              type: "Throwaway",
+              links: [{ url: "https://pillows.su/f/11111111111111111111111111111111" }],
+            },
+            {
+              name: { raw: "Skyline", title: "Skyline" },
+              quality: "High Quality",
+              type: "Throwaway",
+              links: [{ url: "https://pixeldrain.com/u/Skyline2" }],
+            },
+            {
+              name: { raw: "Skyline [V2]", title: "Skyline [V2]" },
+              quality: "Lossless",
+              type: "Demo",
+              links: [{ url: "https://pillows.su/f/22222222222222222222222222222222" }],
+            },
+            {
+              name: { raw: "[Unheard Oct 2022 Sessions]", title: "[Unheard Oct 2022 Sessions]" },
+              quality: "Lossless",
+              type: "Sessions",
+              links: [{ url: "https://pillows.su/f/33333333333333333333333333333333" }],
+            },
+            {
+              name: { raw: "No Link Track", title: "No Link Track" },
+              quality: "Lossless",
+              links: [],
+            },
+            {
+              name: { raw: "Snippet Cut", title: "Snippet Cut" },
+              quality: "Not Available",
+              links: [{ url: "https://www.youtube.com/watch?v=snip123" }],
+            },
+          ],
+        },
+      ],
+    };
+
+    const rawNormalized = normalizeTrackerPayload("test_tracker_1", v3Payload);
+    const curated = curateTrackerResult(rawNormalized);
+
+    // Non-song tabs (Interviews/Art) removed, Unavailable tab added cleanly
+    assert.deepEqual(
+      curated.tracker.tabs.map((t) => t.name),
+      ["Unreleased", "Unavailable"]
+    );
+    // Available songs: Skyline (deduped with 2 links merged!) + Skyline [V2] (distinct version!)
+    const active = curated.tracks.filter((t) => t.tabName !== "Unavailable");
+    assert.equal(active.length, 2);
+    assert.equal(active[0]?.title, "Skyline");
+    assert.equal(active[0]?.links.length, 2);
+    assert.equal(active[1]?.title, "Skyline [V2]");
+
+    // Unavailable song moved to Unavailable tab; No Link Track + Sessions row dropped completely
+    const unavail = curated.tracks.filter((t) => t.tabName === "Unavailable");
+    assert.equal(unavail.length, 1);
+    assert.equal(unavail[0]?.title, "Snippet Cut");
+
+    db.upsertSyncedTracker(curated.tracker, curated.tracks);
+
+    // Global search excludes Unavailable tab automatically, but explicit tabName='Unavailable' finds it
+    const globalSearch = db.searchTracks({ trackerId: "test_tracker_1", playableOnly: true });
+    assert.equal(globalSearch.tracks.length, 2);
+    const unavailSearch = db.searchTracks({ trackerId: "test_tracker_1", tabName: "Unavailable" });
+    assert.equal(unavailSearch.tracks.length, 1);
+    assert.equal(unavailSearch.tracks[0]?.title, "Snippet Cut");
+
+    // Library & Playlist deduplication: same song+version rejected unless distinct version
+    const tSky1 = db.upsertImportedTrack(
+      { trackerId: "imported_web", name: "Imported Web Tracks", artistName: "Web & Streaming" },
+      {
+        ...active[0]!,
+        id: "imp_unforg_1",
+        title: "Unforgettable",
+        artist: "French Montana",
+        primaryUrl: "https://www.youtube.com/watch?v=dup1",
+        links: [{ url: "https://www.youtube.com/watch?v=dup1", host: "youtube", playable: true, formatHint: null }],
+      }
+    );
+    const tSkyDup = db.upsertImportedTrack(
+      { trackerId: "imported_web", name: "Imported Web Tracks", artistName: "Web & Streaming" },
+      {
+        ...active[0]!,
+        id: "imp_unforg_2",
+        title: "Unforgettable ft. Swae Lee",
+        artist: "French Montana",
+        primaryUrl: "https://soundcloud.com/test/unforgettable",
+        links: [{ url: "https://soundcloud.com/test/unforgettable", host: "soundcloud", playable: true, formatHint: null }],
+      }
+    );
+    // Same song merged cleanly instead of creating a duplicate card!
+    assert.equal(tSkyDup.id, tSky1.id);
+    assert.equal(tSkyDup.links.length, 2);
+
+    // Distinct version IS allowed
+    const tSkyRemix = db.upsertImportedTrack(
+      { trackerId: "imported_web", name: "Imported Web Tracks", artistName: "Web & Streaming" },
+      {
+        ...active[0]!,
+        id: "imp_unforg_remix",
+        title: "Unforgettable (Acoustic)",
+        artist: "French Montana",
+        primaryUrl: "https://www.youtube.com/watch?v=acoustic1",
+        links: [{ url: "https://www.youtube.com/watch?v=acoustic1", host: "youtube", playable: true, formatHint: null }],
+      }
+    );
+    assert.notEqual(tSkyRemix.id, tSky1.id);
+
+    const pl = db.createPlaylist({ name: "No Dupes Playlist" });
+    assert.equal(db.addTrackToPlaylist(pl.id, active[0]!.id), true);
+    assert.equal(db.addTrackToPlaylist(pl.id, tSky1.id), true);
+    assert.equal(db.addTrackToPlaylist(pl.id, active[1]!.id), true); // [V2] different version allowed!
+    assert.equal(db.addTrackToPlaylist(pl.id, tSkyRemix.id), true); // (Acoustic) different version allowed!
+
+    // Duplicate same-song same-version (even from another track ID/mirror) blocked from same playlist!
+    const anotherSameVersion = db.upsertImportedTrack(
+      { trackerId: "spotify_imports", name: "Spotify", artistName: "Spotify" },
+      {
+        ...active[0]!,
+        id: "other_unforg_copy",
+        title: "Unforgettable",
+        artist: "French Montana, Swae Lee",
+        primaryUrl: "https://pillows.su/f/44444444444444444444444444444444",
+        links: [],
+      }
+    );
+    // Also test explicit addTrackToPlaylist duplicate rejection for Unforgettable ft. Swae Lee vs Unforgettable
+    assert.equal(db.addTrackToPlaylist(pl.id, anotherSameVersion.id), false);
+    assert.equal(db.addTrackToPlaylist(pl.id, active[0]!.id), false);
+    } finally {
+      db.close();
+    }
   });
 });

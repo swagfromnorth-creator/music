@@ -219,12 +219,6 @@ const el = {
   homeRecentBlock: $("homeRecentBlock"),
   homeRecentShelf: $("homeRecentShelf"),
   homeSeeHistoryBtn: $("homeSeeHistoryBtn"),
-  homeTracksHeading: $("homeTracksHeading"),
-  homeSeeAllBtn: $("homeSeeAllBtn"),
-  homeTrackList: $("homeTrackList"),
-  homeErasHeading: $("homeErasHeading"),
-  homeEraCount: $("homeEraCount"),
-  eraCardsGrid: $("eraCardsGrid"),
 
   searchView: $("searchView"),
   searchSourceTabs: $("searchSourceTabs"),
@@ -1020,39 +1014,13 @@ async function renderHomeView() {
     })
     .join("");
 
-  // 4) Quick stream + Eras across active or all trackers
+  // Keep active tracker state & prewarm era metadata for Search Discover without cluttering Home
   const primary = state.trackers.find((t) => t.trackerId === state.activeTrackerId) || state.trackers[0];
   state.activeTrackerId = primary.trackerId;
   state.activeTabName = state.activeTabName || primary.currentTab;
 
-  const data = await apiJson(`/api/tracks?playableOnly=1&limit=6`);
-  state.homeTracks = data.tracks || [];
-  state.homeEras = data.eras || [];
-  rememberTracks(state.homeTracks);
-
-  el.homeTracksHeading.textContent = "Quick stream";
-  el.homeTrackList.innerHTML = state.homeTracks.length
-    ? state.homeTracks.map((tr) => buildTrackRowHtml(tr, { ctx: "home" })).join("")
-    : `<div class="empty-inline">No playable tracks found yet.</div>`;
-
-  el.homeErasHeading.textContent = "Browse by era";
-  el.homeEraCount.textContent = `${state.homeEras.length} eras`;
-  el.eraCardsGrid.innerHTML = state.homeEras
-    .slice(0, 12)
-    .map((e, idx) => {
-      const img = coverUrl(e.eraImage || "", primary.artistName, e.era);
-      const bg = e.eraColor
-        ? `linear-gradient(135deg, ${e.eraColor}, #111116)`
-        : MIX_GRADIENTS[idx % MIX_GRADIENTS.length];
-      return buildMixCardHtml({
-        title: e.era,
-        subtitle: `${e.count} tracks`,
-        bg,
-        imgUrl: img,
-        dataAttrs: `data-open-era="${escapeHtml(e.era)}"`,
-      });
-    })
-    .join("");
+  const data = await apiJson(`/api/tracks?playableOnly=1&limit=1`).catch(() => null);
+  if (data?.eras) state.homeEras = data.eras;
 }
 
 /* ==================== 2. SEARCH VIEW (Audio X Image 2) ==================== */
@@ -1413,21 +1381,24 @@ async function renderArtistView(trackerId, tabName = null) {
   }
 
   const activeTab = tabName || tracker.currentTab;
+  const isUnavailTab = activeTab === "Unavailable";
   const params = new URLSearchParams({
     trackerId: tracker.trackerId,
     tabName: activeTab,
     limit: "300",
   });
+  if (!isUnavailTab) params.set("playableOnly", "1");
   const data = await apiJson(`/api/tracks?${params.toString()}`);
   const tracks = data.tracks || [];
   rememberTracks(tracks);
 
   // Sort playable tracks by playCount desc then lossless first for Top Hits
-  const topHits = [...tracks]
-    .filter((t) => t.isPlayable)
+  const topHits = (isUnavailTab ? [...tracks] : tracks.filter((t) => t.isPlayable && t.tabName !== "Unavailable"))
     .sort((a, b) => (b.playCount || 0) - (a.playCount || 0) || Number(isTrackLossless(b)) - Number(isTrackLossless(a)));
 
-  const featuring = tracks.filter((t) => /\b(?:feat|ft)\.?\b/i.test(`${t.credits} ${t.title}`));
+  const featuring = isUnavailTab
+    ? []
+    : tracks.filter((t) => t.isPlayable && t.tabName !== "Unavailable" && /\b(?:feat|ft)\.?\b/i.test(`${t.credits} ${t.title}`));
 
   state.artistData = {
     tracker,
@@ -1479,23 +1450,27 @@ async function renderArtistView(trackerId, tabName = null) {
 
   renderArtistLists();
 
-  // Eras grid
-  el.artistErasCount.textContent = `${state.artistData.eras.length} eras`;
-  el.artistErasGrid.innerHTML = state.artistData.eras
-    .map((e, idx) => {
-      const img = coverUrl(e.eraImage || "", tracker.artistName, e.era);
-      const bg = e.eraColor
-        ? `linear-gradient(135deg, ${e.eraColor}, #111116)`
-        : MIX_GRADIENTS[idx % MIX_GRADIENTS.length];
-      return buildMixCardHtml({
-        title: e.era,
-        subtitle: `${e.count} tracks`,
-        bg,
-        imgUrl: img,
-        dataAttrs: `data-open-era="${escapeHtml(e.era)}" data-era-tracker="${escapeHtml(tracker.trackerId)}"`,
-      });
-    })
-    .join("");
+  // Eras grid (hidden inside Unavailable tab)
+  const erasBlock = el.artistErasGrid?.closest(".content-block");
+  if (erasBlock) erasBlock.classList.toggle("hidden", isUnavailTab || state.artistData.eras.length === 0);
+  el.artistErasCount.textContent = isUnavailTab ? "Unavailable archive" : `${state.artistData.eras.length} eras`;
+  el.artistErasGrid.innerHTML = isUnavailTab
+    ? ""
+    : state.artistData.eras
+        .map((e, idx) => {
+          const img = coverUrl(e.eraImage || "", tracker.artistName, e.era);
+          const bg = e.eraColor
+            ? `linear-gradient(135deg, ${e.eraColor}, #111116)`
+            : MIX_GRADIENTS[idx % MIX_GRADIENTS.length];
+          return buildMixCardHtml({
+            title: e.era,
+            subtitle: `${e.count} tracks`,
+            bg,
+            imgUrl: img,
+            dataAttrs: `data-open-era="${escapeHtml(e.era)}" data-era-tracker="${escapeHtml(tracker.trackerId)}"`,
+          });
+        })
+        .join("");
 }
 
 function renderArtistLists() {
@@ -1702,7 +1677,7 @@ async function renderCollectionView(route) {
       await navigate({ view: "library", tab: "playlists" });
     });
   } else if (route.view === "era") {
-    const params = new URLSearchParams({ era: route.era, limit: "250" });
+    const params = new URLSearchParams({ era: route.era, playableOnly: "1", limit: "250" });
     if (route.trackerId) params.set("trackerId", route.trackerId);
     const data = await apiJson(`/api/tracks?${params.toString()}`);
     tracks = data.tracks || [];
@@ -1994,6 +1969,28 @@ async function playTrack(track, linkIndex = undefined, replaceContext = true) {
     }, 900);
   } catch (err) {
     if (err.name === "AbortError") return;
+
+    // Automatic ffmpeg compatibility retry before surfacing a playback error
+    if (!el.audioEl.dataset.compatTried) {
+      el.audioEl.dataset.compatTried = "1";
+      const sep = streamUrl.includes("?") ? "&" : "?";
+      el.audioEl.src = `${streamUrl}${sep}compat=1`;
+      try {
+        await el.audioEl.play();
+        setPlayPauseIcons(true);
+        apiJson("/api/history", {
+          method: "POST",
+          body: JSON.stringify({ trackId: track.id }),
+        })
+          .then(() => refreshHistory())
+          .catch(() => {});
+        return;
+      } catch (compatErr) {
+        if (compatErr?.name === "AbortError") return;
+      }
+    }
+
+    el.audioEl.dataset.compatTried = "2";
     setPlayPauseIcons(false);
     try {
       const probe = await fetch(`/api/tracks/${encodeURIComponent(track.id)}/resolve`, {
@@ -2131,11 +2128,7 @@ async function precacheTrack(trackId) {
 }
 
 function refreshVisibleTrackRows() {
-  if (state.route.view === "home" && state.homeTracks.length) {
-    el.homeTrackList.innerHTML = state.homeTracks
-      .map((tr) => buildTrackRowHtml(state.trackMap.get(tr.id) || tr, { ctx: "home" }))
-      .join("");
-  } else if (state.route.view === "search" && state.searchTracks.length) {
+  if (state.route.view === "search" && state.searchTracks.length) {
     el.searchTrackList.innerHTML = state.searchTracks
       .map((tr) => buildTrackRowHtml(state.trackMap.get(tr.id) || tr, { ctx: "search" }))
       .join("");
@@ -2957,8 +2950,10 @@ function handleTrackListInteraction(ev) {
     return;
   }
 
-  // Clicking row body plays track on double-click or opens Inspector cleanly on single-click
-  openInspector(track);
+  // Single-click lightly selects row; double-click plays the track without popping Inspector open
+  state.selectedTrack = track;
+  document.querySelectorAll(".track-item.active").forEach((elRow) => elRow.classList.remove("active"));
+  row.classList.add("active");
 }
 
 async function recordRecentSearch(payload) {
@@ -3164,15 +3159,6 @@ function bindEvents() {
 
   el.homeSeeLibraryBtn.addEventListener("click", () => navigate({ view: "library", tab: "artists" }));
   el.homeSeeHistoryBtn.addEventListener("click", () => navigate({ view: "profile", tab: "history" }));
-  el.homeSeeAllBtn.addEventListener("click", async () => {
-    state.searchQuery = "";
-    state.searchEra = "";
-    state.playableOnly = true;
-    await navigate({ view: "search" });
-    el.searchDiscoverWrap.classList.add("hidden");
-    el.searchResultsWrap.classList.remove("hidden");
-    await loadSearchResults();
-  });
 
   el.homeRecentShelf.addEventListener("click", (ev) => {
     const playBtn = ev.target.closest("[data-card-play]");
@@ -3355,8 +3341,13 @@ function bindEvents() {
     handleTrackListInteraction(ev);
   });
 
-  // Double-click any track row to play immediately
-  el.stageScroll.addEventListener("dblclick", (ev) => {
+  // Double-click any track row (or online search result) to play immediately
+  el.stageScroll.addEventListener("dblclick", async (ev) => {
+    const onlineRow = ev.target.closest(".online-result-row[data-online-idx]");
+    if (onlineRow) {
+      await importOnlineResult(Number(onlineRow.getAttribute("data-online-idx")), true);
+      return;
+    }
     const row = ev.target.closest(".track-item[data-track-id]");
     if (!row) return;
     const track = state.trackMap.get(row.getAttribute("data-track-id"));
@@ -3639,11 +3630,13 @@ function bindEvents() {
       el.audioEl.dataset.compatTried = "1";
       const sep = el.audioEl.src.includes("?") ? "&" : "?";
       el.audioEl.src = `${el.audioEl.src}${sep}compat=1`;
-      showToast(`Retrying "${state.playingTrack.title}" via ffmpeg compatibility stream...`);
       el.audioEl.play().catch(() => {});
       return;
     }
-    showToast(`Could not decode/play "${state.playingTrack.title}". Try another mirror in Track Inspector.`, "error");
+    if (el.audioEl.dataset.compatTried === "1") {
+      el.audioEl.dataset.compatTried = "2";
+      showToast(`Could not decode/play "${state.playingTrack.title}". Try another mirror in Track Inspector.`, "error");
+    }
   });
 
   // EQ & Speed Popover
@@ -3802,7 +3795,11 @@ function bindEvents() {
     el.addToPlaylistModal.classList.add("hidden");
     state.addToPlaylistTrackId = null;
     await refreshPlaylists();
-    showToast(res.added ? `Added to "${res.playlist?.name}".` : `Already in "${res.playlist?.name}".`, "success");
+    showToast(
+      res.added
+        ? `Added to "${res.playlist?.name}".`
+        : `"${res.playlist?.name}" already has this version of the song.`
+    );
   });
 
   // Profile Edit Modal

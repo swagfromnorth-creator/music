@@ -4,6 +4,14 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { DEFAULT_MAX_CACHE_BYTES } from "./config.ts";
 import type { DemoSeedPayload } from "./demo.ts";
+import { detectHost, isPlayableHost } from "./resolver.ts";
+import {
+  curateAndDeduplicateTracks,
+  extractSongIdentity,
+  isNonSongTab,
+  isNonSongTrack,
+  isUnavailableSong,
+} from "./song-identity.ts";
 import { lookupArtCover } from "./tracker.ts";
 import type {
   ActivityRecord,
@@ -256,6 +264,11 @@ export class AppDatabase {
     if (!existingCap) {
       this.setSetting("max_cache_bytes", String(DEFAULT_MAX_CACHE_BYTES));
     }
+
+    if (this.getSetting("curation_version") !== "v2") {
+      this.cleanupLibraryCuration();
+      this.setSetting("curation_version", "v2");
+    }
   }
 
   public close(): void {
@@ -333,8 +346,10 @@ export class AppDatabase {
       const existingRow = this.db
         .prepare("SELECT synced_tabs_json FROM trackers WHERE tracker_id = ?")
         .get(trackerMeta.trackerId) as Row | undefined;
-      const syncedTabs = safeJsonParse<string[]>(existingRow?.synced_tabs_json, []);
-      if (!syncedTabs.includes(trackerMeta.currentTab)) {
+      const syncedTabs = safeJsonParse<string[]>(existingRow?.synced_tabs_json, []).filter(
+        (t) => !isNonSongTab(t)
+      );
+      if (!isNonSongTab(trackerMeta.currentTab) && !syncedTabs.includes(trackerMeta.currentTab)) {
         syncedTabs.push(trackerMeta.currentTab);
       }
 
@@ -342,19 +357,47 @@ export class AppDatabase {
       const preservedRows = this.db
         .prepare(
           `SELECT id, resolved_url, resolved_mime, resolved_size, resolved_filename, resolved_at, audio_meta_json
-           FROM tracks WHERE tracker_id = ? AND tab_name = ?`
+           FROM tracks WHERE tracker_id = ?`
         )
-        .all(trackerMeta.trackerId, trackerMeta.currentTab) as Row[];
+        .all(trackerMeta.trackerId) as Row[];
 
       const preservedById = new Map<string, Row>();
       for (const r of preservedRows) {
         if (typeof r.id === "string") preservedById.set(r.id, r);
       }
 
+      // Check existing tracks in other tabs of the same tracker to prevent cross-tab duplicates
+      const otherTabRows = this.db
+        .prepare(
+          `SELECT id, tab_name, title, artist, credits, track_type, primary_url, links_json
+           FROM tracks WHERE tracker_id = ? AND tab_name != ?`
+        )
+        .all(trackerMeta.trackerId, trackerMeta.currentTab) as Row[];
+
+      const existingByIdentity = new Map<string, { id: string; links: TrackLink[] }>();
+      const existingByUrl = new Map<string, { id: string; links: TrackLink[] }>();
+      for (const r of otherTabRows) {
+        const entry = {
+          id: String(r.id),
+          links: safeJsonParse<TrackLink[]>(r.links_json, []),
+        };
+        const ident = extractSongIdentity({
+          title: String(r.title ?? ""),
+          artist: String(r.artist ?? ""),
+          credits: typeof r.credits === "string" ? r.credits : "",
+          trackType: typeof r.track_type === "string" ? r.track_type : null,
+        });
+        existingByIdentity.set(ident.canonicalKey, entry);
+        if (typeof r.primary_url === "string" && r.primary_url) {
+          existingByUrl.set(r.primary_url, entry);
+        }
+      }
+
       this.db
         .prepare("DELETE FROM tracks WHERE tracker_id = ? AND tab_name = ?")
         .run(trackerMeta.trackerId, trackerMeta.currentTab);
 
+      const curatedIncoming = curateAndDeduplicateTracks(tracks);
       const insertTrack = this.db.prepare(`
         INSERT INTO tracks (
           id, tracker_id, tab_name, title, raw_name, credits, artist,
@@ -371,9 +414,48 @@ export class AppDatabase {
           ?, ?, ?, ?, ?,
           ?, ?
         )
+        ON CONFLICT(id) DO UPDATE SET
+          tab_name = excluded.tab_name,
+          title = excluded.title,
+          raw_name = excluded.raw_name,
+          credits = excluded.credits,
+          artist = excluded.artist,
+          era = excluded.era,
+          era_image = COALESCE(excluded.era_image, tracks.era_image),
+          notes = excluded.notes,
+          quality = excluded.quality,
+          format_hint = excluded.format_hint,
+          primary_url = excluded.primary_url,
+          primary_host = excluded.primary_host,
+          links_json = excluded.links_json,
+          is_playable = excluded.is_playable
       `);
 
-      for (const tr of tracks) {
+      const updateExistingLinks = this.db.prepare("UPDATE tracks SET links_json = ? WHERE id = ?");
+
+      for (const tr of curatedIncoming) {
+        const ident = extractSongIdentity(tr);
+        const crossTabMatch =
+          existingByIdentity.get(ident.canonicalKey) ??
+          (tr.primaryUrl ? existingByUrl.get(tr.primaryUrl) : undefined);
+
+        if (crossTabMatch) {
+          // Merge any extra mirror URLs into the already-synced song without duplicating it
+          const seenUrls = new Set(crossTabMatch.links.map((l) => l.url));
+          let changed = false;
+          for (const l of tr.links) {
+            if (!seenUrls.has(l.url)) {
+              seenUrls.add(l.url);
+              crossTabMatch.links.push(l);
+              changed = true;
+            }
+          }
+          if (changed) {
+            updateExistingLinks.run(JSON.stringify(crossTabMatch.links), crossTabMatch.id);
+          }
+          continue;
+        }
+
         const prev = preservedById.get(tr.id);
         insertTrack.run(
           tr.id,
@@ -411,15 +493,32 @@ export class AppDatabase {
         );
       }
 
+      const hasUnavailable = this.db
+        .prepare("SELECT 1 FROM tracks WHERE tracker_id = ? AND tab_name = 'Unavailable' LIMIT 1")
+        .get(trackerMeta.trackerId);
+
+      const cleanTabs = trackerMeta.tabs.filter((t) => !isNonSongTab(t.name));
+      if (hasUnavailable) {
+        if (!cleanTabs.some((t) => t.name === "Unavailable")) {
+          cleanTabs.push({ name: "Unavailable", slug: "unavailable", gid: "" });
+        }
+        if (!syncedTabs.includes("Unavailable")) {
+          syncedTabs.push("Unavailable");
+        }
+      }
+
       const totals = this.db
         .prepare(
           `SELECT COUNT(*) AS total_count, COALESCE(SUM(is_playable), 0) AS playable_count
-           FROM tracks WHERE tracker_id = ?`
+           FROM tracks WHERE tracker_id = ? AND tab_name != 'Unavailable' AND is_playable = 1`
         )
         .get(trackerMeta.trackerId) as Row;
 
-      const totalCount = Number(totals.total_count ?? tracks.length);
+      const totalCount = Number(totals.total_count ?? 0);
       const playableCount = Number(totals.playable_count ?? 0);
+      const currentTab = isNonSongTab(trackerMeta.currentTab)
+        ? (cleanTabs[0]?.name ?? "Unreleased")
+        : trackerMeta.currentTab;
 
       this.db
         .prepare(
@@ -442,8 +541,8 @@ export class AppDatabase {
           trackerMeta.trackerId,
           trackerMeta.name,
           trackerMeta.artistName,
-          trackerMeta.currentTab,
-          JSON.stringify(trackerMeta.tabs),
+          currentTab,
+          JSON.stringify(cleanTabs),
           JSON.stringify(syncedTabs),
           totalCount,
           playableCount,
@@ -455,6 +554,8 @@ export class AppDatabase {
 
       return {
         ...trackerMeta,
+        currentTab,
+        tabs: cleanTabs,
         syncedTabs,
         trackCount: totalCount,
         playableCount,
@@ -647,6 +748,47 @@ export class AppDatabase {
     const tabName = trackerMeta.tabName?.trim() || track.tabName || "Imported";
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const incomingIdent = extractSongIdentity(track);
+      const existingCandidates = this.db
+        .prepare(
+          `SELECT id, tab_name, title, artist, credits, track_type, primary_url, links_json
+           FROM tracks WHERE primary_url = ? OR LOWER(artist) = LOWER(?)`
+        )
+        .all(track.primaryUrl ?? "", track.artist) as Row[];
+
+      const duplicateMatch = existingCandidates.find((r) => {
+        if (String(r.id) === track.id) return false;
+        if (track.primaryUrl && String(r.primary_url ?? "") === track.primaryUrl) return true;
+        const rIdent = extractSongIdentity({
+          title: String(r.title ?? ""),
+          artist: String(r.artist ?? ""),
+          credits: typeof r.credits === "string" ? r.credits : "",
+          trackType: typeof r.track_type === "string" ? r.track_type : null,
+        });
+        return rIdent.canonicalKey === incomingIdent.canonicalKey;
+      });
+
+      if (duplicateMatch) {
+        const existingId = String(duplicateMatch.id);
+        const existingLinks = safeJsonParse<TrackLink[]>(duplicateMatch.links_json, []);
+        const seenUrls = new Set(existingLinks.map((l) => l.url));
+        let changed = false;
+        for (const l of track.links) {
+          if (!seenUrls.has(l.url)) {
+            seenUrls.add(l.url);
+            existingLinks.push(l);
+            changed = true;
+          }
+        }
+        if (changed) {
+          this.db
+            .prepare("UPDATE tracks SET links_json = ? WHERE id = ?")
+            .run(JSON.stringify(existingLinks), existingId);
+        }
+        this.db.exec("COMMIT");
+        return this.getTrackById(existingId) ?? track;
+      }
+
       const existingTracker = this.db
         .prepare("SELECT tabs_json, synced_tabs_json, current_tab FROM trackers WHERE tracker_id = ?")
         .get(trackerMeta.trackerId) as Row | undefined;
@@ -763,7 +905,7 @@ export class AppDatabase {
       const totals = this.db
         .prepare(
           `SELECT COUNT(*) AS total_count, COALESCE(SUM(is_playable), 0) AS playable_count
-           FROM tracks WHERE tracker_id = ?`
+           FROM tracks WHERE tracker_id = ? AND tab_name != 'Unavailable' AND is_playable = 1`
         )
         .get(trackerMeta.trackerId) as Row;
 
@@ -861,6 +1003,8 @@ export class AppDatabase {
     if (params.tabName) {
       baseWhere.push("t.tab_name = ?");
       baseParams.push(params.tabName);
+    } else {
+      baseWhere.push("t.tab_name != 'Unavailable'");
     }
 
     const filterWhere = [...baseWhere];
@@ -1174,6 +1318,35 @@ export class AppDatabase {
   }
 
   public addTrackToPlaylist(playlistId: string, trackId: string): boolean {
+    const candidate = this.getTrackById(trackId);
+    if (!candidate) return false;
+
+    const candidateIdent = extractSongIdentity(candidate);
+    const existingRows = this.db
+      .prepare(
+        `SELECT t.id, t.title, t.artist, t.credits, t.track_type, t.primary_url
+         FROM playlist_tracks pt
+         INNER JOIN tracks t ON t.id = pt.track_id
+         WHERE pt.playlist_id = ?`
+      )
+      .all(playlistId) as Row[];
+
+    for (const row of existingRows) {
+      if (String(row.id) === trackId) return false;
+      if (candidate.primaryUrl && String(row.primary_url ?? "") === candidate.primaryUrl) {
+        return false;
+      }
+      const existingIdent = extractSongIdentity({
+        title: String(row.title ?? ""),
+        artist: String(row.artist ?? ""),
+        credits: typeof row.credits === "string" ? row.credits : "",
+        trackType: typeof row.track_type === "string" ? row.track_type : null,
+      });
+      if (existingIdent.canonicalKey === candidateIdent.canonicalKey) {
+        return false;
+      }
+    }
+
     const maxRow = this.db
       .prepare("SELECT COALESCE(MAX(position), -1) AS max_pos FROM playlist_tracks WHERE playlist_id = ?")
       .get(playlistId) as Row;
@@ -1188,6 +1361,234 @@ export class AppDatabase {
       .run(playlistId, trackId, nextPos, now);
     this.db.prepare("UPDATE playlists SET updated_at = ? WHERE id = ?").run(now, playlistId);
     return Number(info.changes ?? 0) > 0;
+  }
+
+  public cleanupLibraryCuration(): {
+    removedTracks: number;
+    movedToUnavailable: number;
+    mergedDuplicates: number;
+  } {
+    const allRows = this.db.prepare("SELECT * FROM tracks ORDER BY era_order ASC, track_order ASC").all() as Row[];
+    if (allRows.length === 0) {
+      return { removedTracks: 0, movedToUnavailable: 0, mergedDuplicates: 0 };
+    }
+
+    let removedTracks = 0;
+    let movedToUnavailable = 0;
+    let mergedDuplicates = 0;
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const survivorsByKey = new Map<string, { id: string; links: TrackLink[]; unavailable: boolean; quality: string }>();
+      const urlToSurvivor = new Map<string, string>();
+      const deleteIds: string[] = [];
+      const moveUnavailableIds: string[] = [];
+      const linkUpdates = new Map<string, TrackLink[]>();
+      const playableUpdates: Array<{ id: string; host: string; links: TrackLink[] }> = [];
+
+      const migrateRefs = (fromId: string, toId: string) => {
+        this.db.prepare("UPDATE OR IGNORE liked_tracks SET track_id = ? WHERE track_id = ?").run(toId, fromId);
+        this.db.prepare("DELETE FROM liked_tracks WHERE track_id = ?").run(fromId);
+        this.db.prepare("UPDATE OR IGNORE playlist_tracks SET track_id = ? WHERE track_id = ?").run(toId, fromId);
+        this.db.prepare("DELETE FROM playlist_tracks WHERE track_id = ?").run(fromId);
+        this.db.prepare("UPDATE play_history SET track_id = ? WHERE track_id = ?").run(toId, fromId);
+      };
+
+      for (const r of allRows) {
+        const id = String(r.id);
+        const trackerId = String(r.tracker_id);
+        const tabName = String(r.tab_name);
+        const title = String(r.title ?? "");
+        const artist = String(r.artist ?? "");
+        const credits = String(r.credits ?? "");
+        const trackType = typeof r.track_type === "string" ? r.track_type : null;
+        const quality = String(r.quality ?? "");
+        const primaryUrl = typeof r.primary_url === "string" ? r.primary_url : null;
+        let links = safeJsonParse<TrackLink[]>(r.links_json, []);
+
+        // Re-evaluate playability against current hosts (except skip non-songs cleanly)
+        let isPlayable = Number(r.is_playable ?? 0) === 1;
+        if (!isPlayable && links.length > 0) {
+          links = links.map((l) => {
+            const h = detectHost(l.url);
+            return { ...l, host: h, playable: isPlayableHost(h) };
+          });
+          isPlayable = links.some((l) => l.playable);
+          if (isPlayable) {
+            const best = links.find((l) => l.playable) ?? links[0];
+            playableUpdates.push({ id, host: best?.host ?? "unknown", links });
+          }
+        }
+
+        if (!isPlayable || isNonSongTrack({ tabName, title, trackType, quality, primaryUrl, isPlayable })) {
+          deleteIds.push(id);
+          removedTracks++;
+          continue;
+        }
+
+        const unavailable = isUnavailableSong({ quality, trackType, isPlayable });
+        if (unavailable && tabName !== "Unavailable") {
+          moveUnavailableIds.push(id);
+          movedToUnavailable++;
+        }
+
+        const ident = extractSongIdentity({ title, artist, credits, trackType });
+        const scopeGroup =
+          trackerId === "imported_web" || trackerId === "spotify_imports" ? "imported" : trackerId;
+        const key = `${scopeGroup}::${ident.canonicalKey}`;
+        const existingKey =
+          survivorsByKey.has(key)
+            ? key
+            : primaryUrl && urlToSurvivor.has(primaryUrl)
+              ? urlToSurvivor.get(primaryUrl)!
+              : null;
+
+        if (existingKey) {
+          const winner = survivorsByKey.get(existingKey)!;
+          const seen = new Set(winner.links.map((l) => l.url));
+          for (const l of links) {
+            if (!seen.has(l.url)) {
+              seen.add(l.url);
+              winner.links.push(l);
+              linkUpdates.set(winner.id, winner.links);
+            }
+          }
+          migrateRefs(id, winner.id);
+          deleteIds.push(id);
+          mergedDuplicates++;
+          continue;
+        }
+
+        const survivor = { id, links: [...links], unavailable, quality };
+        survivorsByKey.set(key, survivor);
+        if (primaryUrl) urlToSurvivor.set(primaryUrl, key);
+      }
+
+      for (const up of playableUpdates) {
+        if (!deleteIds.includes(up.id)) {
+          this.db
+            .prepare("UPDATE tracks SET is_playable = 1, primary_host = ?, links_json = ? WHERE id = ?")
+            .run(up.host, JSON.stringify(up.links), up.id);
+        }
+      }
+
+      const updLinksStmt = this.db.prepare("UPDATE tracks SET links_json = ? WHERE id = ?");
+      for (const [id, mergedLinks] of linkUpdates.entries()) {
+        updLinksStmt.run(JSON.stringify(mergedLinks), id);
+      }
+
+      const moveUnavailStmt = this.db.prepare("UPDATE tracks SET tab_name = 'Unavailable' WHERE id = ?");
+      for (const id of moveUnavailableIds) {
+        if (!deleteIds.includes(id)) moveUnavailStmt.run(id);
+      }
+
+      const delTrackStmt = this.db.prepare("DELETE FROM tracks WHERE id = ?");
+      const delLikeStmt = this.db.prepare("DELETE FROM liked_tracks WHERE track_id = ?");
+      const delPlStmt = this.db.prepare("DELETE FROM playlist_tracks WHERE track_id = ?");
+      const delHistStmt = this.db.prepare("DELETE FROM play_history WHERE track_id = ?");
+      const clearCacheTrackStmt = this.db.prepare("UPDATE cache_entries SET track_id = NULL WHERE track_id = ?");
+      for (const id of deleteIds) {
+        delLikeStmt.run(id);
+        delPlStmt.run(id);
+        delHistStmt.run(id);
+        clearCacheTrackStmt.run(id);
+        delTrackStmt.run(id);
+      }
+
+      // Deduplicate any duplicate songs already sitting inside playlists
+      const pls = this.db.prepare("SELECT id FROM playlists").all() as Row[];
+      for (const pl of pls) {
+        const pid = String(pl.id);
+        const rows = this.db
+          .prepare(
+            `SELECT pt.track_id, t.title, t.artist, t.credits, t.track_type, t.primary_url
+             FROM playlist_tracks pt
+             INNER JOIN tracks t ON t.id = pt.track_id
+             WHERE pt.playlist_id = ?
+             ORDER BY pt.position ASC, pt.added_at ASC`
+          )
+          .all(pid) as Row[];
+        const seenPlKeys = new Set<string>();
+        const seenPlUrls = new Set<string>();
+        for (const row of rows) {
+          const tid = String(row.track_id);
+          const url = typeof row.primary_url === "string" ? row.primary_url : "";
+          const ident = extractSongIdentity({
+            title: String(row.title ?? ""),
+            artist: String(row.artist ?? ""),
+            credits: typeof row.credits === "string" ? row.credits : "",
+            trackType: typeof row.track_type === "string" ? row.track_type : null,
+          });
+          if (seenPlKeys.has(ident.canonicalKey) || (url && seenPlUrls.has(url))) {
+            this.db.prepare("DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?").run(pid, tid);
+          } else {
+            seenPlKeys.add(ident.canonicalKey);
+            if (url) seenPlUrls.add(url);
+          }
+        }
+      }
+
+      // Refresh every tracker's clean tabs, synced_tabs, and playable counts
+      const trackerRows = this.db.prepare("SELECT * FROM trackers").all() as Row[];
+      for (const tr of trackerRows) {
+        const tid = String(tr.tracker_id);
+        const tabs = safeJsonParse<TrackerTabMeta[]>(tr.tabs_json, []).filter((t) => !isNonSongTab(t.name));
+        let syncedTabs = safeJsonParse<string[]>(tr.synced_tabs_json, []).filter((t) => !isNonSongTab(t));
+        const hasUnavail = this.db
+          .prepare("SELECT 1 FROM tracks WHERE tracker_id = ? AND tab_name = 'Unavailable' LIMIT 1")
+          .get(tid);
+
+        if (hasUnavail) {
+          if (!tabs.some((t) => t.name === "Unavailable")) {
+            tabs.push({ name: "Unavailable", slug: "unavailable", gid: "" });
+          }
+          if (!syncedTabs.includes("Unavailable")) {
+            syncedTabs.push("Unavailable");
+          }
+        } else {
+          syncedTabs = syncedTabs.filter((t) => t !== "Unavailable");
+        }
+
+        const totals = this.db
+          .prepare(
+            `SELECT COUNT(*) AS cnt, COALESCE(SUM(is_playable), 0) AS pcnt
+             FROM tracks WHERE tracker_id = ? AND tab_name != 'Unavailable' AND is_playable = 1`
+          )
+          .get(tid) as Row;
+        const curTab = isNonSongTab(String(tr.current_tab ?? ""))
+          ? (syncedTabs[0] ?? tabs[0]?.name ?? "Unreleased")
+          : String(tr.current_tab);
+
+        this.db
+          .prepare(
+            `UPDATE trackers SET current_tab = ?, tabs_json = ?, synced_tabs_json = ?, track_count = ?, playable_count = ?
+             WHERE tracker_id = ?`
+          )
+          .run(
+            curTab,
+            JSON.stringify(tabs),
+            JSON.stringify(syncedTabs),
+            Number(totals.cnt ?? 0),
+            Number(totals.pcnt ?? 0),
+            tid
+          );
+      }
+
+      // Clear stale cached YouTube/SoundCloud resolutions so next play uses yt-dlp + faststart remux
+      this.db
+        .prepare(
+          `UPDATE tracks SET resolved_url = NULL, resolved_mime = NULL, resolved_at = NULL
+           WHERE primary_host IN ('youtube', 'soundcloud')`
+        )
+        .run();
+
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+
+    return { removedTracks, movedToUnavailable, mergedDuplicates };
   }
 
   public removeTrackFromPlaylist(playlistId: string, trackId: string): boolean {

@@ -12,6 +12,7 @@ export interface YtDlpExtraction {
   streamUrl: string;
   ext: string | null;
   acodec: string | null;
+  protocol?: string | null;
   sampleRateHz: number | null;
   abr: number | null;
   filesize: number | null;
@@ -151,6 +152,7 @@ export async function resolveWithYtDlp(targetUrl: string, timeoutMs = 15000): Pr
     url?: string;
     ext?: string;
     acodec?: string;
+    protocol?: string;
     asr?: number;
     abr?: number;
     filesize?: number;
@@ -174,6 +176,7 @@ export async function resolveWithYtDlp(targetUrl: string, timeoutMs = 15000): Pr
     streamUrl: info.url,
     ext: info.ext ?? null,
     acodec: info.acodec ?? null,
+    protocol: info.protocol ?? null,
     sampleRateHz: typeof info.asr === "number" ? info.asr : null,
     abr: typeof info.abr === "number" ? info.abr : null,
     filesize:
@@ -398,6 +401,57 @@ export async function probeAudioWithFfprobe(filePathOrUrl: string): Promise<Audi
   } catch {
     return null;
   }
+}
+
+export async function remuxStreamToFile(
+  inputPathOrUrl: string,
+  outputPath: string,
+  httpHeaders?: Record<string, string>,
+  timeoutMs = 45000
+): Promise<{ mimeType: string; ext: string; sizeBytes: number }> {
+  const ffmpeg = findFfmpegExecutable();
+  if (!ffmpeg) {
+    throw new Error("ffmpeg executable not found for stream remuxing.");
+  }
+
+  const baseInputArgs = ["-hide_banner", "-loglevel", "error", "-y"];
+  if (/^https?:\/\//i.test(inputPathOrUrl) && httpHeaders) {
+    const headerLines = Object.entries(httpHeaders)
+      .filter(([, v]) => Boolean(v))
+      .map(([k, v]) => `${k}: ${v}\r\n`)
+      .join("");
+    if (headerLines) {
+      baseInputArgs.push("-headers", headerLines);
+    }
+  }
+  baseInputArgs.push("-i", inputPathOrUrl, "-vn");
+
+  // 1) Try lossless container remux first (ftypdash / HLS m3u8 AAC -> faststart ftypisom M4A)
+  try {
+    await execFileAsync(
+      ffmpeg,
+      [...baseInputArgs, "-c:a", "copy", "-movflags", "+faststart", "-f", "mp4", outputPath],
+      { env: buildToolEnv(), timeout: timeoutMs }
+    );
+    const stat = fs.statSync(outputPath);
+    if (stat.size > 1024) {
+      return { mimeType: "audio/mp4", ext: "m4a", sizeBytes: stat.size };
+    }
+  } catch {
+    // Fall through to compatibility MP3 transcode
+  }
+
+  // 2) Fallback transcode to standard 256kbps MP3 (handles WebM Opus/Vorbis -> universal MP3)
+  await execFileAsync(
+    ffmpeg,
+    [...baseInputArgs, "-c:a", "libmp3lame", "-b:a", "256k", "-f", "mp3", outputPath],
+    { env: buildToolEnv(), timeout: timeoutMs }
+  );
+  const stat = fs.statSync(outputPath);
+  if (stat.size <= 0) {
+    throw new Error("ffmpeg produced an empty audio file.");
+  }
+  return { mimeType: "audio/mpeg", ext: "mp3", sizeBytes: stat.size };
 }
 
 export async function streamTranscodedAudio(
