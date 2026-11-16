@@ -1,12 +1,14 @@
+import { spawn } from "node:child_process";
 import dns from "node:dns";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
-
-dns.setDefaultResultOrder("ipv4first");
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+dns.setDefaultResultOrder("ipv4first");
+
 import { DiskCacheManager } from "./cache.ts";
 import { CACHE_DIR, DATA_DIR, DB_PATH, HOST, PORT } from "./config.ts";
 import { AppDatabase } from "./db.ts";
@@ -14,6 +16,7 @@ import { buildDemoSeedPayload, createDemoAudioResponse, renderDemoArtSvg } from 
 import { ImageProxyCache } from "./images.ts";
 import { resolveHostUrl, type FetchLike } from "./resolver.ts";
 import { fetchArtTabCovers, fetchDirectoryArtists, fetchTrackerFromArtistGrid } from "./tracker.ts";
+import { applyGitUpdate, checkForUpdates, getCurrentCommit } from "./updater.ts";
 import type { DirectoryArtist, HostResolution, SyncResult, TrackRecord, UserProfile } from "./types.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -59,6 +62,8 @@ export interface AppContext {
   db: AppDatabase;
   cache: DiskCacheManager;
   server: http.Server;
+  getCommit: () => string | null;
+  setCommit: (c: string | null) => void;
   close: () => Promise<void>;
 }
 
@@ -68,6 +73,7 @@ export function createAppServer(options: {
   imagesDir?: string;
   fetchImpl?: FetchLike;
   publicDir?: string;
+  initialCommit?: string | null;
 } = {}): AppContext {
   const dbPath = options.dbPath ?? DB_PATH;
   const db = new AppDatabase(dbPath);
@@ -90,6 +96,9 @@ export function createAppServer(options: {
   const imageCache = new ImageProxyCache(imagesDir, rawFetchImpl);
   const publicDir = options.publicDir ?? PUBLIC_DIR;
 
+  let currentCommit: string | null = options.initialCommit ?? null;
+  let lastAutoUpdateCheck = 0;
+  let lastAutoUpdateError: string | null = null;
   let directoryCache: { fetchedAt: number; artists: DirectoryArtist[] } | null = null;
 
   async function resolveTrackLink(
@@ -210,9 +219,17 @@ export function createAppServer(options: {
     const pathname = decodeURIComponent(parsedUrl.pathname);
 
     try {
-      // Health check
+      // Health check (also exposes current git commit so browser auto-reloads on GitHub updates)
       if (method === "GET" && pathname === "/api/health") {
-        sendJson(res, 200, { ok: true, cacheDir: cache.cacheDir, dataDir: DATA_DIR });
+        sendJson(res, 200, {
+          ok: true,
+          cacheDir: cache.cacheDir,
+          dataDir: DATA_DIR,
+          commit: currentCommit,
+          autoUpdateEnabled: process.env.AUTO_UPDATE !== "0",
+          lastAutoUpdateCheck,
+          lastAutoUpdateError,
+        });
         return;
       }
 
@@ -724,6 +741,47 @@ export function createAppServer(options: {
         return;
       }
 
+      // GitHub auto-update endpoints (loopback only)
+      const isLoopback =
+        req.socket.remoteAddress === "127.0.0.1" ||
+        req.socket.remoteAddress === "::1" ||
+        req.socket.remoteAddress === "::ffff:127.0.0.1";
+
+      if (method === "GET" && pathname === "/api/update/status") {
+        const status = await checkForUpdates();
+        if (status.localCommit) currentCommit = status.localCommit;
+        lastAutoUpdateCheck = Date.now();
+        lastAutoUpdateError = status.supported ? null : status.reason ?? null;
+        sendJson(res, 200, {
+          ...status,
+          autoUpdateEnabled: process.env.AUTO_UPDATE !== "0",
+          lastCheckedAt: lastAutoUpdateCheck,
+          lastError: lastAutoUpdateError,
+        });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/update/apply") {
+        if (!isLoopback) {
+          sendJson(res, 403, { error: "Updates can only be triggered from localhost." });
+          return;
+        }
+        const result = await applyGitUpdate();
+        currentCommit = result.currentCommit;
+        sendJson(res, 200, result);
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/update/restart") {
+        if (!isLoopback) {
+          sendJson(res, 403, { error: "Restart can only be triggered from localhost." });
+          return;
+        }
+        sendJson(res, 200, { restarting: true });
+        setTimeout(() => void restartSelf(), 150);
+        return;
+      }
+
       // Static frontend fallback
       if (method === "GET" && !pathname.startsWith("/api/")) {
         await serveStatic(pathname, res);
@@ -742,10 +800,40 @@ export function createAppServer(options: {
     }
   });
 
+  async function restartSelf(): Promise<void> {
+    try {
+      server.closeAllConnections?.();
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
+      db.close();
+    } catch {
+      // continue restart
+    }
+
+    if (process.env.VAULTSTREAM_SUPERVISED === "1") {
+      process.exit(42);
+    }
+
+    const entry = fileURLToPath(import.meta.url);
+    const child = spawn(process.execPath, [entry], {
+      cwd: process.cwd(),
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.unref();
+    process.exit(0);
+  }
+
   return {
     db,
     cache,
     server,
+    getCommit: () => currentCommit,
+    setCommit: (c) => {
+      currentCommit = c;
+    },
     close: async () => {
       server.closeAllConnections?.();
       await new Promise<void>((resolve, reject) => {
@@ -759,25 +847,108 @@ export function createAppServer(options: {
 const isEntrypoint =
   process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
 
-if (isEntrypoint) {
-  const ctx = createAppServer();
-  ctx.server.listen(PORT, HOST, () => {
-    console.log(`Lossless Tracker Player listening at http://${HOST}:${PORT}`);
-    console.log(`SQLite FTS5 DB: ${DB_PATH}`);
-    console.log(`LRU Disk Cache: ${CACHE_DIR}`);
-    // Backfill permanent Art-tab cover URLs for any already-synced trackers
-    void (async () => {
-      for (const t of ctx.db.listTrackers()) {
-        if (t.trackerId.startsWith("demo_")) continue;
-        try {
-          const covers = await fetchArtTabCovers(t.trackerId, t.tabs);
-          if (covers.size > 0) {
-            ctx.db.updateTrackerEraImages(t.trackerId, covers);
-          }
-        } catch {
-          // ignore non-critical background art refresh
-        }
+async function listenWithRetry(server: http.Server, port: number, host: string): Promise<void> {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onErr = (err: NodeJS.ErrnoException) => {
+          server.off("listening", onOk);
+          reject(err);
+        };
+        const onOk = () => {
+          server.off("error", onErr);
+          resolve();
+        };
+        server.once("error", onErr);
+        server.once("listening", onOk);
+        server.listen(port, host);
+      });
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "EADDRINUSE" && attempt < 7) {
+        await new Promise((r) => setTimeout(r, 250));
+        continue;
       }
-    })();
-  });
+      throw err;
+    }
+  }
+}
+
+if (isEntrypoint) {
+  const initialCommit = await getCurrentCommit();
+  const ctx = createAppServer({ initialCommit });
+  await listenWithRetry(ctx.server, PORT, HOST);
+
+  console.log(`Lossless Tracker Player listening at http://${HOST}:${PORT}`);
+  console.log(`SQLite FTS5 DB: ${DB_PATH}`);
+  console.log(`LRU Disk Cache: ${CACHE_DIR}`);
+  if (initialCommit) console.log(`Git commit: ${initialCommit}`);
+
+  // Backfill permanent Art-tab cover URLs for any already-synced trackers
+  void (async () => {
+    for (const t of ctx.db.listTrackers()) {
+      if (t.trackerId.startsWith("demo_")) continue;
+      try {
+        const covers = await fetchArtTabCovers(t.trackerId, t.tabs);
+        if (covers.size > 0) {
+          ctx.db.updateTrackerEraImages(t.trackerId, covers);
+        }
+      } catch {
+        // ignore non-critical background art refresh
+      }
+    }
+  })();
+
+  // Automatic background GitHub auto-updater (pulls new commits from origin/main automatically)
+  if (process.env.AUTO_UPDATE !== "0" && fs.existsSync(path.join(process.cwd(), ".git"))) {
+    const intervalMs = Math.max(5000, Number(process.env.AUTO_UPDATE_INTERVAL_MS ?? 20000));
+    let autoUpdateBusy = false;
+
+    const runAutoUpdateTick = async () => {
+      if (autoUpdateBusy) return;
+      autoUpdateBusy = true;
+      try {
+        const status = await checkForUpdates();
+        if (!status.supported || status.behindCount === 0) return;
+
+        console.log(
+          `[auto-update] Found ${status.behindCount} new commit(s) on origin/main (${status.localCommit} -> ${status.remoteCommit}). Pulling...`
+        );
+        const applied = await applyGitUpdate();
+        if (!applied.updated) return;
+
+        ctx.setCommit(applied.currentCommit);
+        console.log(
+          `[auto-update] Updated ${applied.previousCommit} -> ${applied.currentCommit} (${applied.changedFiles.length} file(s))`
+        );
+
+        if (applied.needsServerRestart) {
+          console.log("[auto-update] Backend changed — restarting server...");
+          await ctx.close();
+          if (process.env.VAULTSTREAM_SUPERVISED === "1") {
+            process.exit(42);
+          }
+          const child = spawn(process.execPath, [fileURLToPath(import.meta.url)], {
+            cwd: process.cwd(),
+            detached: true,
+            stdio: "ignore",
+            windowsHide: true,
+          });
+          child.unref();
+          process.exit(0);
+        }
+      } catch (err) {
+        console.error(
+          "[auto-update] Failed:",
+          err instanceof Error ? err.message : String(err)
+        );
+      } finally {
+        autoUpdateBusy = false;
+      }
+    };
+
+    setTimeout(() => void runAutoUpdateTick(), 4000);
+    setInterval(() => void runAutoUpdateTick(), intervalMs).unref();
+  }
 }

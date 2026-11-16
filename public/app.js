@@ -413,6 +413,10 @@ const el = {
   customCapMbInput: $("customCapMbInput"),
   clearAllCacheBtn: $("clearAllCacheBtn"),
   cacheEntriesList: $("cacheEntriesList"),
+  updateStatusText: $("updateStatusText"),
+  checkUpdateBtn: $("checkUpdateBtn"),
+  applyUpdateBtn: $("applyUpdateBtn"),
+  restartAppBtn: $("restartAppBtn"),
   testResolveForm: $("testResolveForm"),
   testResolveInput: $("testResolveInput"),
   testResolveOutput: $("testResolveOutput"),
@@ -2825,11 +2829,13 @@ function bindEvents() {
     el.cacheModal.classList.remove("hidden");
     await refreshCacheStats();
     if (state.cacheStats) renderCacheModal(state.cacheStats);
+    void refreshUpdateStatus(false);
   });
   el.sidebarCacheSummary.addEventListener("click", async () => {
     el.cacheModal.classList.remove("hidden");
     await refreshCacheStats();
     if (state.cacheStats) renderCacheModal(state.cacheStats);
+    void refreshUpdateStatus(false);
   });
 
   // Mobile sidebar
@@ -3694,6 +3700,50 @@ function bindEvents() {
     }
   });
 
+  // GitHub auto-updater controls
+  el.checkUpdateBtn.addEventListener("click", () => refreshUpdateStatus(false));
+
+  el.applyUpdateBtn.addEventListener("click", async () => {
+    el.applyUpdateBtn.disabled = true;
+    el.applyUpdateBtn.textContent = "Pulling...";
+    try {
+      const res = await apiJson("/api/update/apply", { method: "POST", body: "{}" });
+      el.applyUpdateBtn.classList.add("hidden");
+      if (res.updated) {
+        el.updateStatusText.textContent = `Updated ${res.previousCommit} → ${res.currentCommit}.`;
+        if (res.needsServerRestart) {
+          el.restartAppBtn.classList.remove("hidden");
+        }
+        showToast(`Pulled latest from GitHub (${res.previousCommit} → ${res.currentCommit}).`, "success");
+      } else {
+        el.updateStatusText.textContent = `Already up to date (${res.currentCommit}).`;
+      }
+    } catch (err) {
+      el.updateStatusText.textContent = `Update failed: ${err.message}`;
+    } finally {
+      el.applyUpdateBtn.disabled = false;
+      el.applyUpdateBtn.textContent = "Pull & Update";
+    }
+  });
+
+  el.restartAppBtn.addEventListener("click", async () => {
+    try {
+      await apiJson("/api/update/restart", { method: "POST", body: "{}" });
+      el.updateStatusText.textContent = "Restarting server...";
+      setTimeout(() => location.reload(), 1800);
+    } catch (err) {
+      showToast(`Restart failed: ${err.message}`, "error");
+    }
+  });
+
+  el.audioEl.addEventListener("pause", () => {
+    if (pendingFrontendReload) {
+      setTimeout(() => {
+        if (el.audioEl.paused) location.reload();
+      }, 600);
+    }
+  });
+
   // Close popovers on outside click
   document.addEventListener("click", (ev) => {
     if (!ev.target.closest("#notifPopover, #notifBellBtn")) el.notifPopover.classList.add("hidden");
@@ -3742,12 +3792,66 @@ function bindEvents() {
   });
 }
 
+/* ==================== GITHUB AUTO-UPDATER ==================== */
+let bootCommit = null;
+let pendingFrontendReload = false;
+
+async function refreshUpdateStatus(notifyToast = false) {
+  try {
+    const status = await apiJson("/api/update/status");
+    if (!status.supported) {
+      el.updateStatusText.textContent = status.reason || "Updates unavailable";
+      el.applyUpdateBtn.classList.add("hidden");
+      return;
+    }
+    const modeLabel = status.autoUpdateEnabled ? "Auto-update ON (20s)" : "Manual mode";
+    if (status.behindCount > 0) {
+      el.updateStatusText.textContent = `${modeLabel} · Pulling ${status.behindCount} new commit(s) (${status.localCommit} → ${status.remoteCommit})`;
+      el.applyUpdateBtn.classList.remove("hidden");
+      if (notifyToast) {
+        showToast(
+          `GitHub update detected (${status.behindCount} new commit${status.behindCount > 1 ? "s" : ""}) — auto-updating...`,
+          "info"
+        );
+      }
+    } else {
+      el.updateStatusText.textContent = `${modeLabel} · Up to date (${status.localCommit || "main"})`;
+      el.applyUpdateBtn.classList.add("hidden");
+    }
+  } catch {
+    el.updateStatusText.textContent = "Could not reach GitHub";
+  }
+}
+
+async function pollServerVersion() {
+  try {
+    const health = await apiJson("/api/health");
+    if (!health.commit) return;
+    if (!bootCommit) {
+      bootCommit = health.commit;
+      return;
+    }
+    if (health.commit !== bootCommit) {
+      pendingFrontendReload = true;
+      if (el.audioEl.paused || !el.audioEl.src) {
+        showToast(`Updated from GitHub (${health.commit}) — refreshing...`, "success");
+        setTimeout(() => location.reload(), 900);
+      } else {
+        showToast(`Updated from GitHub (${health.commit}) — will reload when playback pauses.`, "info");
+      }
+    }
+  } catch {
+    // ignore transient restart window while server swaps processes
+  }
+}
+
 /* ==================== BOOTSTRAP ==================== */
 (async function init() {
   el.audioEl.volume = state.volume;
   updateVolumeUI();
   renderEqSliders();
   bindEvents();
-  await refreshAllCore();
+  await Promise.all([refreshAllCore(), pollServerVersion()]);
   await navigate({ view: "home" });
+  setInterval(() => void pollServerVersion(), 12000);
 })();

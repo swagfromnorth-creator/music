@@ -17,11 +17,16 @@ Lightweight local Node.js + TypeScript proof-of-concept validating:
 - **Node.js v24+** (uses built-in `node:sqlite` with FTS5 and native TypeScript type stripping)
 
 ## Run Locally
+Double-click **`start.bat`** (auto-pulls updates from GitHub and opens **http://127.0.0.1:3456**), or run manually:
 ```bash
 npm install
 npm start
 ```
 Then open **http://127.0.0.1:3456** in your browser.
+
+### Automatic GitHub Updates
+- While running, VaultStream automatically checks `origin/main` every 20 seconds (`AUTO_UPDATE_INTERVAL_MS`, set `AUTO_UPDATE=0` to disable), pulls new commits via `git pull --rebase --autostash`, restarts automatically if backend files changed, and refreshes the browser UI cleanly.
+- You can also run **`Pull-From-GitHub.bat`** or **`Push-To-GitHub.bat`** manually at any time.
 
 ### Environment Variables (Optional)
 - `PORT` (default `3456`)
