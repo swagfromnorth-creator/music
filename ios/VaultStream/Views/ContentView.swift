@@ -11,10 +11,8 @@ enum AppTab: Hashable {
 struct ContentView: View {
     @EnvironmentObject private var player: AudioPlayerManager
     @EnvironmentObject private var library: LibraryStore
-    @AppStorage(APIClient.serverURLKey) private var serverBaseURL = ""
 
     @State private var selectedTab: AppTab = .home
-    @State private var showOnboarding = false
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -72,16 +70,6 @@ struct ContentView: View {
         }
         .sheet(item: $player.activeInspectTrack) { track in
             TrackInspectorSheet(track: track)
-        }
-        .sheet(isPresented: $showOnboarding) {
-            ServerSetupSheet()
-        }
-        .task {
-            if serverBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                showOnboarding = true
-            } else {
-                await library.refreshAll()
-            }
         }
     }
 

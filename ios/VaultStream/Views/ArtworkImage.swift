@@ -7,7 +7,7 @@ final class ImageMemoryCache {
     private let cache = NSCache<NSString, UIImage>()
 
     private init() {
-        cache.countLimit = 300
+        cache.countLimit = 350
     }
 
     func image(for url: URL) -> UIImage? {
@@ -29,7 +29,11 @@ struct ArtworkImage: View {
     @State private var attemptedURL: URL?
 
     private var resolvedURL: URL? {
-        APIClient.shared.artworkURL(urlString)
+        guard var raw = urlString?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        if raw.hasPrefix("//") { raw = "https:" + raw }
+        return URL(string: raw)
     }
 
     var body: some View {
@@ -79,6 +83,7 @@ struct ArtworkImage: View {
             var req = URLRequest(url: target)
             req.cachePolicy = .returnCacheDataElseLoad
             req.timeoutInterval = 15
+            req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X)", forHTTPHeaderField: "User-Agent")
             let (data, _) = try await URLSession.shared.data(for: req)
             if let img = UIImage(data: data) {
                 ImageMemoryCache.shared.insert(img, for: target)

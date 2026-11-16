@@ -727,7 +727,7 @@ export async function remuxStreamToFile(
 export async function streamTranscodedAudio(
   inputPathOrUrl: string,
   res: ServerResponse,
-  options: { lossless?: boolean; forceMp3?: boolean; httpHeaders?: Record<string, string> } = {}
+  options: { lossless?: boolean; httpHeaders?: Record<string, string> } = {}
 ): Promise<void> {
   const ffmpeg = findFfmpegExecutable();
   if (!ffmpeg) {
@@ -748,15 +748,14 @@ export async function streamTranscodedAudio(
   }
 
   args.push("-i", inputPathOrUrl, "-vn");
-  const useFlac = Boolean(options.lossless && !options.forceMp3);
-  if (useFlac) {
+  if (options.lossless) {
     args.push("-c:a", "flac", "-f", "flac", "pipe:1");
   } else {
     args.push("-c:a", "libmp3lame", "-b:a", "320k", "-f", "mp3", "pipe:1");
   }
 
   res.writeHead(200, {
-    "Content-Type": useFlac ? "audio/flac" : "audio/mpeg",
+    "Content-Type": options.lossless ? "audio/flac" : "audio/mpeg",
     "Cache-Control": "no-store",
     "X-Transcoded-By": "ffmpeg",
   });

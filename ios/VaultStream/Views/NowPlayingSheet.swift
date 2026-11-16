@@ -146,7 +146,7 @@ struct NowPlayingSheet: View {
                         // Like Heart
                         let liked = library.likedIds.contains(track.id) || track.likedFlag
                         Button {
-                            Task { await library.toggleLike(track: track) }
+                            library.toggleLike(track: track)
                         } label: {
                             Image(systemName: liked ? "heart.fill" : "heart")
                                 .font(.title2)

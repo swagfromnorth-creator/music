@@ -1,11 +1,12 @@
+import CryptoKit
 import Foundation
 
 struct TrackLink: Codable, Hashable, Sendable {
-    let url: String
-    let text: String?
-    let host: String
-    let playable: Bool
-    let formatHint: String?
+    var url: String
+    var text: String?
+    var host: String
+    var playable: Bool
+    var formatHint: String?
 
     init(url: String, text: String? = nil, host: String = "unknown", playable: Bool = true, formatHint: String? = nil) {
         self.url = url
@@ -26,12 +27,12 @@ struct TrackLink: Codable, Hashable, Sendable {
 }
 
 struct AudioHeaderInfo: Codable, Hashable, Sendable {
-    let codec: String?
-    let sampleRateHz: Int?
-    let bitsPerSample: Int?
-    let channels: Int?
-    let durationSec: Double?
-    let lossless: Bool?
+    var codec: String?
+    var sampleRateHz: Int?
+    var bitsPerSample: Int?
+    var channels: Int?
+    var durationSec: Double?
+    var lossless: Bool?
 
     var summaryBadge: String? {
         guard let codec, !codec.isEmpty else { return nil }
@@ -44,80 +45,115 @@ struct AudioHeaderInfo: Codable, Hashable, Sendable {
     }
 }
 
-struct TrackCacheStatus: Codable, Hashable, Sendable {
-    let cacheKey: String
-    let cachedBytes: Int64
-    let totalBytes: Int64?
-    let isComplete: Bool
-    let lastAccessedAt: Double
-}
-
 struct TrackRecord: Codable, Identifiable, Hashable, Sendable {
-    let id: String
-    let trackerId: String
-    let tabName: String
-    let title: String
-    let rawName: String
-    let credits: String
-    let artist: String
-    let era: String
-    let subEra: String
-    let eraOrder: Int
-    let trackOrder: Int
-    let eraColor: String?
-    let eraTextColor: String?
-    let eraImage: String?
-    let notes: String
-    let quality: String
-    let formatHint: String?
-    let trackLength: String?
-    let availableLength: String?
-    let leakDate: String?
-    let fileDate: String?
-    let trackType: String?
-    let primaryUrl: String?
-    let primaryHost: String
-    let links: [TrackLink]
-    let resolvedUrl: String?
-    let resolvedMime: String?
-    let resolvedSize: Int64?
-    let resolvedFilename: String?
-    let resolvedAt: Double?
-    let isPlayable: Bool
+    var id: String
+    var trackerId: String
+    var tabName: String
+    var title: String
+    var rawName: String
+    var credits: String
+    var artist: String
+    var era: String
+    var subEra: String
+    var eraOrder: Int
+    var trackOrder: Int
+    var eraColor: String?
+    var eraTextColor: String?
+    var eraImage: String?
+    var notes: String
+    var quality: String
+    var formatHint: String?
+    var trackLength: String?
+    var availableLength: String?
+    var leakDate: String?
+    var fileDate: String?
+    var trackType: String?
+    var primaryUrl: String?
+    var primaryHost: String
+    var links: [TrackLink]
+    var resolvedUrl: String?
+    var resolvedMime: String?
+    var resolvedSize: Int64?
+    var resolvedFilename: String?
+    var resolvedAt: Double?
+    var isPlayable: Bool
     var isUnavailable: Bool?
-    let audioMeta: AudioHeaderInfo?
-    let cacheStatus: TrackCacheStatus?
+    var audioMeta: AudioHeaderInfo?
     var isLiked: Bool?
     var playCount: Int?
 
-    var unavailableFlag: Bool {
-        if isUnavailable == true { return true }
-        if tabName.caseInsensitiveCompare("Unavailable") == .orderedSame { return true }
-        return !isPlayable
-    }
-
-    var likedFlag: Bool {
-        isLiked ?? false
-    }
-
-    var isLossless: Bool {
-        if audioMeta?.lossless == true { return true }
-        let q = (quality + " " + (formatHint ?? "") + " " + (resolvedMime ?? "")).lowercased()
-        return q.contains("flac") || q.contains("wav") || q.contains("alac") || q.contains("lossless") || q.contains("aiff")
-    }
-
-    var subtitleLine: String {
-        let parts = [artist, era.isEmpty ? nil : era, primaryHost == "unknown" ? nil : primaryHost]
-            .compactMap { $0 }
-            .filter { !$0.isEmpty }
-        return parts.joined(separator: " • ")
-    }
-
-    var badgeText: String? {
-        if let meta = audioMeta?.summaryBadge { return meta }
-        if let fmt = formatHint, !fmt.isEmpty { return fmt.uppercased() }
-        if !quality.isEmpty && quality.count <= 24 { return quality }
-        return primaryHost == "unknown" ? nil : primaryHost.uppercased()
+    init(
+        id: String,
+        trackerId: String,
+        tabName: String,
+        title: String,
+        rawName: String? = nil,
+        credits: String = "",
+        artist: String,
+        era: String = "",
+        subEra: String = "",
+        eraOrder: Int = 0,
+        trackOrder: Int = 0,
+        eraColor: String? = nil,
+        eraTextColor: String? = nil,
+        eraImage: String? = nil,
+        notes: String = "",
+        quality: String = "",
+        formatHint: String? = nil,
+        trackLength: String? = nil,
+        availableLength: String? = nil,
+        leakDate: String? = nil,
+        fileDate: String? = nil,
+        trackType: String? = nil,
+        primaryUrl: String? = nil,
+        primaryHost: String = "unknown",
+        links: [TrackLink] = [],
+        resolvedUrl: String? = nil,
+        resolvedMime: String? = nil,
+        resolvedSize: Int64? = nil,
+        resolvedFilename: String? = nil,
+        resolvedAt: Double? = nil,
+        isPlayable: Bool = true,
+        isUnavailable: Bool? = false,
+        audioMeta: AudioHeaderInfo? = nil,
+        isLiked: Bool? = false,
+        playCount: Int? = 0
+    ) {
+        self.id = id
+        self.trackerId = trackerId
+        self.tabName = tabName
+        self.title = title
+        self.rawName = rawName ?? title
+        self.credits = credits
+        self.artist = artist
+        self.era = era
+        self.subEra = subEra
+        self.eraOrder = eraOrder
+        self.trackOrder = trackOrder
+        self.eraColor = eraColor
+        self.eraTextColor = eraTextColor
+        self.eraImage = eraImage
+        self.notes = notes
+        self.quality = quality
+        self.formatHint = formatHint
+        self.trackLength = trackLength
+        self.availableLength = availableLength
+        self.leakDate = leakDate
+        self.fileDate = fileDate
+        self.trackType = trackType
+        self.primaryUrl = primaryUrl
+        self.primaryHost = primaryHost
+        self.links = links
+        self.resolvedUrl = resolvedUrl
+        self.resolvedMime = resolvedMime
+        self.resolvedSize = resolvedSize
+        self.resolvedFilename = resolvedFilename
+        self.resolvedAt = resolvedAt
+        self.isPlayable = isPlayable
+        self.isUnavailable = isUnavailable
+        self.audioMeta = audioMeta
+        self.isLiked = isLiked
+        self.playCount = playCount
     }
 
     init(from decoder: Decoder) throws {
@@ -155,49 +191,88 @@ struct TrackRecord: Codable, Identifiable, Hashable, Sendable {
         isPlayable = (try? c.decode(Bool.self, forKey: .isPlayable)) ?? true
         isUnavailable = try? c.decodeIfPresent(Bool.self, forKey: .isUnavailable)
         audioMeta = try? c.decodeIfPresent(AudioHeaderInfo.self, forKey: .audioMeta)
-        cacheStatus = try? c.decodeIfPresent(TrackCacheStatus.self, forKey: .cacheStatus)
         isLiked = try? c.decodeIfPresent(Bool.self, forKey: .isLiked)
         playCount = try? c.decodeIfPresent(Int.self, forKey: .playCount)
+    }
+
+    var unavailableFlag: Bool {
+        if isUnavailable == true { return true }
+        if tabName.caseInsensitiveCompare("Unavailable") == .orderedSame { return true }
+        return !isPlayable
+    }
+
+    var likedFlag: Bool { isLiked ?? false }
+
+    var isLossless: Bool {
+        if audioMeta?.lossless == true { return true }
+        let q = (quality + " " + (formatHint ?? "") + " " + (resolvedMime ?? "")).lowercased()
+        return q.contains("flac") || q.contains("wav") || q.contains("alac") || q.contains("lossless") || q.contains("aiff") || q.contains("cdq")
+    }
+
+    var subtitleLine: String {
+        let parts = [artist, era.isEmpty ? nil : era, primaryHost == "unknown" ? nil : primaryHost]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+        return parts.joined(separator: " • ")
+    }
+
+    var badgeText: String? {
+        if let meta = audioMeta?.summaryBadge { return meta }
+        if let fmt = formatHint, !fmt.isEmpty { return fmt.uppercased() }
+        if !quality.isEmpty && quality.count <= 24 { return quality }
+        return primaryHost == "unknown" ? nil : primaryHost.uppercased()
     }
 }
 
 struct TrackerTabMeta: Codable, Hashable, Identifiable, Sendable {
-    let gid: String?
-    let name: String
-    let slug: String?
+    var gid: String?
+    var name: String
+    var slug: String?
     var id: String { (gid ?? "") + ":" + name }
 }
 
 struct TrackerRecord: Codable, Identifiable, Hashable, Sendable {
-    let trackerId: String
-    let name: String
-    let artistName: String
-    let currentTab: String
-    let tabs: [TrackerTabMeta]
-    let syncedTabs: [String]
-    let trackCount: Int
-    let playableCount: Int
-    let credits: String?
-    let lastSyncedAt: Double
+    var trackerId: String
+    var name: String
+    var artistName: String
+    var currentTab: String
+    var tabs: [TrackerTabMeta]
+    var syncedTabs: [String]
+    var trackCount: Int
+    var playableCount: Int
+    var credits: String?
+    var lastSyncedAt: Double
     var isFollowed: Bool?
-    let coverImage: String?
+    var coverImage: String?
 
     var id: String { trackerId }
 
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        trackerId = try c.decode(String.self, forKey: .trackerId)
-        name = (try? c.decode(String.self, forKey: .name)) ?? "Tracker"
-        artistName = (try? c.decode(String.self, forKey: .artistName)) ?? name
-        currentTab = (try? c.decode(String.self, forKey: .currentTab)) ?? ""
-        tabs = (try? c.decode([TrackerTabMeta].self, forKey: .tabs)) ?? []
-        syncedTabs = (try? c.decode([String].self, forKey: .syncedTabs)) ?? []
-        trackCount = (try? c.decode(Int.self, forKey: .trackCount)) ?? 0
-        playableCount = (try? c.decode(Int.self, forKey: .playableCount)) ?? 0
-        credits = try? c.decodeIfPresent(String.self, forKey: .credits)
-        lastSyncedAt = (try? c.decode(Double.self, forKey: .lastSyncedAt)) ?? 0
-        isFollowed = try? c.decodeIfPresent(Bool.self, forKey: .isFollowed)
-        coverImage = try? c.decodeIfPresent(String.self, forKey: .coverImage)
+    init(
+        trackerId: String,
+        name: String,
+        artistName: String,
+        currentTab: String,
+        tabs: [TrackerTabMeta] = [],
+        syncedTabs: [String] = [],
+        trackCount: Int = 0,
+        playableCount: Int = 0,
+        credits: String? = nil,
+        lastSyncedAt: Double = Date().timeIntervalSince1970 * 1000,
+        isFollowed: Bool? = true,
+        coverImage: String? = nil
+    ) {
+        self.trackerId = trackerId
+        self.name = name
+        self.artistName = artistName
+        self.currentTab = currentTab
+        self.tabs = tabs
+        self.syncedTabs = syncedTabs
+        self.trackCount = trackCount
+        self.playableCount = playableCount
+        self.credits = credits
+        self.lastSyncedAt = lastSyncedAt
+        self.isFollowed = isFollowed
+        self.coverImage = coverImage
     }
 }
 
@@ -209,65 +284,20 @@ struct EraFacet: Codable, Hashable, Identifiable, Sendable {
     var id: String { era }
 }
 
-struct HostFacet: Codable, Hashable, Sendable {
-    let host: String
-    let count: Int
-}
-
-struct QualityFacet: Codable, Hashable, Sendable {
-    let quality: String
-    let count: Int
-}
-
-struct SearchResult: Codable, Sendable {
-    let tracks: [TrackRecord]
-    let total: Int
-    let queryMs: Double?
-    let eras: [EraFacet]?
-    let hosts: [HostFacet]?
-    let qualities: [QualityFacet]?
-}
-
 struct PlaylistRecord: Codable, Identifiable, Hashable, Sendable {
-    let id: String
-    let name: String
-    let description: String
-    let coverGradient: String
-    let coverImage: String?
-    let trackCount: Int
-    let previewImages: [String]
-    let createdAt: Double
-    let updatedAt: Double
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decode(String.self, forKey: .id)
-        name = (try? c.decode(String.self, forKey: .name)) ?? "Playlist"
-        description = (try? c.decode(String.self, forKey: .description)) ?? ""
-        coverGradient = (try? c.decode(String.self, forKey: .coverGradient)) ?? ""
-        coverImage = try? c.decodeIfPresent(String.self, forKey: .coverImage)
-        trackCount = (try? c.decode(Int.self, forKey: .trackCount)) ?? 0
-        previewImages = (try? c.decode([String].self, forKey: .previewImages)) ?? []
-        createdAt = (try? c.decode(Double.self, forKey: .createdAt)) ?? 0
-        updatedAt = (try? c.decode(Double.self, forKey: .updatedAt)) ?? 0
-    }
-}
-
-struct PlaylistDetail: Codable, Identifiable, Hashable, Sendable {
-    let id: String
-    let name: String
-    let description: String
-    let coverGradient: String
-    let coverImage: String?
-    let trackCount: Int
-    let previewImages: [String]
-    let tracks: [TrackRecord]
-    let createdAt: Double
-    let updatedAt: Double
+    var id: String
+    var name: String
+    var description: String
+    var coverGradient: String
+    var coverImage: String?
+    var trackCount: Int
+    var previewImages: [String]
+    var createdAt: Double
+    var updatedAt: Double
 }
 
 struct PlayHistoryItem: Codable, Identifiable, Hashable, Sendable {
-    let id: Int
+    let id: String
     let trackId: String
     let playedAt: Double
     let track: TrackRecord
@@ -299,13 +329,60 @@ struct OnlineCollectionResult: Codable, Identifiable, Hashable, Sendable {
 
 struct HostResolution: Codable, Hashable, Sendable {
     let ok: Bool
+    let sourceUrl: String
     let resolvedUrl: String?
-    let host: String?
+    let downloadableUrl: String?
+    let host: String
     let mimeType: String?
-    let sizeBytes: Int64?
     let filename: String?
-    let errorMessage: String?
+    let sizeBytes: Int64?
+    let formatHint: String?
+    let httpHeaders: [String: String]?
+    let title: String?
+    let artist: String?
+    let album: String?
+    let thumbnail: String?
+    let durationSec: Double?
     let errorCode: String?
+    let errorMessage: String?
+
+    init(
+        ok: Bool,
+        sourceUrl: String,
+        resolvedUrl: String? = nil,
+        downloadableUrl: String? = nil,
+        host: String,
+        mimeType: String? = nil,
+        filename: String? = nil,
+        sizeBytes: Int64? = nil,
+        formatHint: String? = nil,
+        httpHeaders: [String: String]? = nil,
+        title: String? = nil,
+        artist: String? = nil,
+        album: String? = nil,
+        thumbnail: String? = nil,
+        durationSec: Double? = nil,
+        errorCode: String? = nil,
+        errorMessage: String? = nil
+    ) {
+        self.ok = ok
+        self.sourceUrl = sourceUrl
+        self.resolvedUrl = resolvedUrl
+        self.downloadableUrl = downloadableUrl
+        self.host = host
+        self.mimeType = mimeType
+        self.filename = filename
+        self.sizeBytes = sizeBytes
+        self.formatHint = formatHint
+        self.httpHeaders = httpHeaders
+        self.title = title
+        self.artist = artist
+        self.album = album
+        self.thumbnail = thumbnail
+        self.durationSec = durationSec
+        self.errorCode = errorCode
+        self.errorMessage = errorMessage
+    }
 }
 
 struct OfflineTrackEntry: Codable, Identifiable, Hashable, Sendable {
@@ -316,120 +393,24 @@ struct OfflineTrackEntry: Codable, Identifiable, Hashable, Sendable {
     let downloadedAt: Date
 }
 
-// MARK: - API Response Wrappers
-
-struct HealthResponse: Codable, Sendable {
-    let ok: Bool
-    let commit: String?
-    let autoUpdateEnabled: Bool?
-}
-
-struct TrackersResponse: Codable, Sendable {
-    let trackers: [TrackerRecord]
-}
-
-struct PlaylistsResponse: Codable, Sendable {
-    let playlists: [PlaylistRecord]
-}
-
-struct PlaylistDetailResponse: Codable, Sendable {
-    let playlist: PlaylistDetail?
-}
-
-struct PlaylistMutateResponse: Codable, Sendable {
-    let added: Bool?
-    let duplicateSong: Bool?
-    let playlist: PlaylistDetail?
-}
-
-struct CreatePlaylistResponse: Codable, Sendable {
-    let playlist: PlaylistRecord
-}
-
-struct LikesResponse: Codable, Sendable {
-    let likedIds: [String]
-    let tracks: [TrackRecord]
-    let followedTrackerIds: [String]
-}
-
-struct ToggleLikeResponse: Codable, Sendable {
-    let trackId: String
-    let liked: Bool
-    let likedCount: Int
-}
-
-struct FollowTrackerResponse: Codable, Sendable {
-    let trackerId: String
-    let followed: Bool
-}
-
-struct HistoryResponse: Codable, Sendable {
-    let items: [PlayHistoryItem]
-    let totalPlays: Int
-}
-
-struct DiscoverSearchResponse: Codable, Sendable {
-    let query: String
-    let source: String
-    let results: [OnlineSearchResult]
-    let collections: [OnlineCollectionResult]?
-}
-
-struct ImportURLResponse: Codable, Sendable {
-    let isCollection: Bool?
-    let playlist: PlaylistDetail?
-    let tracks: [TrackRecord]?
-    let track: TrackRecord?
-}
-
-struct ImportCollectionResponse: Codable, Sendable {
-    let title: String
-    let artist: String
-    let thumbnail: String?
-    let tracks: [TrackRecord]
-    let playlist: PlaylistDetail?
-}
-
-struct TrackAvailabilityResponse: Codable, Sendable {
-    let track: TrackRecord?
-}
-
-struct TrackResolveResponse: Codable, Sendable {
-    let track: TrackRecord?
-    let resolution: HostResolution
-}
-
-struct SyncTrackerResponse: Codable, Sendable {
-    let tracker: TrackerRecord
-    let tabSynced: String
-    let tracksSynced: Int
-    let playableTracks: Int
-    let elapsedMs: Double
-}
-
-struct MediaSettingsResponse: Codable, Sendable {
-    let cookiesBrowser: String
-}
-
-struct SpotifyImportResponse: Codable, Sendable {
-    let totalParsed: Int
-    let tracksAdded: Int
-    let matchedLocal: Int
-    let matchedOnline: Int
-    let playlist: PlaylistDetail?
-}
-
-struct BatchMusicBrainzResponse: Codable, Sendable {
-    let updatedCount: Int?
-}
-
 struct DirectoryArtist: Codable, Identifiable, Hashable, Sendable {
-    var id: String { trackerId }
+    var id: String { trackerId + ":" + name }
     let trackerId: String
-    let artist: String
-    let category: String?
+    let name: String
+    let url: String
+    let isLinkWorking: Bool
+    let isUpdated: Bool
+    let isStarred: Bool
 }
 
-struct DirectoryResponse: Codable, Sendable {
-    let artists: [DirectoryArtist]
+enum HashHelper {
+    static func shortSHA256(_ input: String, length: Int = 20) -> String {
+        let digest = SHA256.hash(data: Data(input.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined().prefix(length).description
+    }
+
+    static func sha1Hex(_ input: String) -> String {
+        let digest = Insecure.SHA1.hash(data: Data(input.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
 }

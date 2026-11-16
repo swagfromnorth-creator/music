@@ -1,18 +1,18 @@
 import SwiftUI
 
 enum SearchSource: String, CaseIterable, Identifiable {
-    case library = "library"
     case ytmusic = "ytmusic"
     case youtube = "youtube"
     case soundcloud = "soundcloud"
+    case library = "library"
 
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .library: return "Library"
         case .ytmusic: return "YT Music"
         case .youtube: return "YouTube"
         case .soundcloud: return "SoundCloud"
+        case .library: return "Library"
         }
     }
 }
@@ -22,7 +22,7 @@ struct SearchView: View {
     @EnvironmentObject private var library: LibraryStore
 
     @State private var query = ""
-    @State private var source: SearchSource = .library
+    @State private var source: SearchSource = .ytmusic
     @State private var losslessOnly = false
     @State private var isSearching = false
     @State private var importingId: String?
@@ -49,7 +49,7 @@ struct SearchView: View {
                     HStack(spacing: 8) {
                         Button {
                             losslessOnly.toggle()
-                            Task { await runSearch() }
+                            runLibraryFilter()
                         } label: {
                             Label("Lossless Only", systemImage: losslessOnly ? "checkmark.circle.fill" : "hifispeaker")
                                 .font(.caption.weight(.semibold))
@@ -91,10 +91,10 @@ struct SearchView: View {
                             if libraryResults.isEmpty && !isSearching {
                                 emptyStateView(
                                     icon: "magnifyingglass",
-                                    title: query.isEmpty ? "Search Your Library" : "No Library Matches",
+                                    title: query.isEmpty ? "Search Saved Library" : "No Library Matches",
                                     subtitle: query.isEmpty
-                                        ? "Type a song, artist, or era — or switch to YT Music / SoundCloud above."
-                                        : "Try another spelling or search YT Music / SoundCloud."
+                                        ? "Browse saved tracks & synced artists — or pick YT Music / SoundCloud."
+                                        : "Try another spelling or search online above."
                                 )
                             } else {
                                 ForEach(libraryResults) { track in
@@ -137,8 +137,8 @@ struct SearchView: View {
                                     OnlineTrackRow(
                                         item: item,
                                         isBusy: importingId == item.id,
-                                        onPlay: { Task { await importAndPlayOnlineTrack(item) } },
-                                        onAddLibrary: { Task { await importOnlyOnlineTrack(item) } }
+                                        onPlay: { importAndPlayOnlineTrack(item) },
+                                        onAddLibrary: { saveOnlineTrackOnly(item) }
                                     )
                                     .padding(.horizontal, 16)
                                 }
@@ -146,7 +146,7 @@ struct SearchView: View {
                                 emptyStateView(
                                     icon: "waveform.and.magnifyingglass",
                                     title: "Search \(source.label)",
-                                    subtitle: "Find songs, remixes, albums, and playlists and play them natively."
+                                    subtitle: "Stream songs, albums, and playlists directly on your iPhone."
                                 )
                             }
                         }
@@ -161,13 +161,17 @@ struct SearchView: View {
                 Task { await runSearch() }
             }
             .task(id: "\(source.rawValue)|\(query)") {
+                if source == .library {
+                    runLibraryFilter()
+                    return
+                }
                 let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
-                if clean.isEmpty && source != .library {
+                if clean.isEmpty || looksLikeURL {
                     onlineTracks = []
                     onlineCollections = []
                     return
                 }
-                try? await Task.sleep(nanoseconds: source == .library ? 250_000_000 : 450_000_000)
+                try? await Task.sleep(nanoseconds: 450_000_000)
                 if !Task.isCancelled {
                     await runSearch()
                 }
@@ -189,7 +193,7 @@ struct SearchView: View {
                 Text("Import Link or Playlist")
                     .font(.subheadline.weight(.bold))
                     .foregroundStyle(Theme.textPrimary)
-                Text("Fetch stream & save directly to your VaultStream library")
+                Text("Stream directly and save into your iPhone library")
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary)
             }
@@ -207,23 +211,17 @@ struct SearchView: View {
         .padding(.horizontal, 16)
     }
 
+    private func runLibraryFilter() {
+        searchError = nil
+        libraryResults = Array(library.searchTracks(query: query, losslessOnly: losslessOnly).tracks.prefix(150))
+    }
+
     private func runSearch() async {
         let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
         searchError = nil
 
         if source == .library {
-            isSearching = true
-            defer { isSearching = false }
-            do {
-                let res = try await APIClient.shared.searchTracks(
-                    q: clean.isEmpty ? nil : clean,
-                    losslessOnly: losslessOnly,
-                    limit: 120
-                )
-                libraryResults = res.tracks
-            } catch {
-                searchError = error.localizedDescription
-            }
+            runLibraryFilter()
             return
         }
 
@@ -231,9 +229,21 @@ struct SearchView: View {
         isSearching = true
         defer { isSearching = false }
         do {
-            let res = try await APIClient.shared.discoverSearch(query: clean, source: source.rawValue, limit: 15)
-            onlineTracks = res.results
-            onlineCollections = res.collections ?? []
+            switch source {
+            case .ytmusic:
+                let res = try await YouTubeService.shared.searchYouTubeMusic(query: clean, limit: 15)
+                onlineTracks = res.tracks
+                onlineCollections = res.collections
+            case .youtube:
+                onlineTracks = try await YouTubeService.shared.searchYouTubeVideos(query: clean, limit: 15)
+                onlineCollections = []
+            case .soundcloud:
+                let res = try await SoundCloudService.shared.search(query: clean, limit: 15)
+                onlineTracks = res.tracks
+                onlineCollections = res.collections
+            case .library:
+                break
+            }
         } catch {
             searchError = error.localizedDescription
         }
@@ -245,69 +255,67 @@ struct SearchView: View {
         isSearching = true
         defer { isSearching = false }
         do {
-            let res = try await APIClient.shared.importUrl(url: target)
-            if let tracks = res.tracks, !tracks.isEmpty {
-                player.play(track: tracks[0], queue: tracks)
-                library.showToast("Imported \"\(res.playlist?.name ?? "Collection")\" (\(tracks.count) tracks)")
-            } else if let tr = res.track {
-                player.play(track: tr)
-                library.showToast("Imported & playing \"\(tr.title)\"")
+            let res = try await library.importUrl(target)
+            if let first = res.tracks.first {
+                player.play(track: first, queue: res.tracks)
+                library.showToast(
+                    res.playlist != nil
+                        ? "Imported \"\(res.playlist!.name)\" (\(res.tracks.count) tracks)"
+                        : "Playing \"\(first.title)\""
+                )
             }
-            await library.refreshAll()
         } catch {
             searchError = error.localizedDescription
         }
     }
 
-    private func importAndPlayOnlineTrack(_ item: OnlineSearchResult) async {
-        importingId = item.id
-        defer { importingId = nil }
-        do {
-            let res = try await APIClient.shared.importUrl(
-                url: item.url,
-                title: item.title,
-                artist: item.artist,
-                album: item.album,
-                thumbnail: item.thumbnail
+    private func importAndPlayOnlineTrack(_ item: OnlineSearchResult) {
+        let host = item.source == "soundcloud" ? "soundcloud" : "youtube"
+        let queueTracks = onlineTracks.map {
+            library.upsertOnlineTrack(
+                sourceUrl: $0.url,
+                title: $0.title,
+                artist: $0.artist,
+                album: $0.album,
+                thumbnail: $0.thumbnail,
+                durationSec: $0.durationSec,
+                host: $0.source == "soundcloud" ? "soundcloud" : "youtube"
             )
-            if let track = res.track {
-                player.play(track: track)
-                await library.refreshAll()
-            }
-        } catch {
-            library.showToast(error.localizedDescription)
         }
+        let target = library.upsertOnlineTrack(
+            sourceUrl: item.url,
+            title: item.title,
+            artist: item.artist,
+            album: item.album,
+            thumbnail: item.thumbnail,
+            durationSec: item.durationSec,
+            host: host
+        )
+        player.play(track: target, queue: queueTracks)
     }
 
-    private func importOnlyOnlineTrack(_ item: OnlineSearchResult) async {
-        importingId = item.id
-        defer { importingId = nil }
-        do {
-            let res = try await APIClient.shared.importUrl(
-                url: item.url,
-                title: item.title,
-                artist: item.artist,
-                album: item.album,
-                thumbnail: item.thumbnail
-            )
-            if let track = res.track {
-                library.showToast("Saved \"\(track.title)\" to Library")
-                await library.refreshAll()
-            }
-        } catch {
-            library.showToast(error.localizedDescription)
-        }
+    private func saveOnlineTrackOnly(_ item: OnlineSearchResult) {
+        let host = item.source == "soundcloud" ? "soundcloud" : "youtube"
+        let saved = library.upsertOnlineTrack(
+            sourceUrl: item.url,
+            title: item.title,
+            artist: item.artist,
+            album: item.album,
+            thumbnail: item.thumbnail,
+            durationSec: item.durationSec,
+            host: host
+        )
+        library.showToast("Saved \"\(saved.title)\" to Library")
     }
 
     private func importAndPlayCollection(_ col: OnlineCollectionResult) async {
         importingId = col.id
         defer { importingId = nil }
         do {
-            let res = try await APIClient.shared.importCollection(col, savePlaylist: true)
+            let res = try await library.importCollection(col, savePlaylist: true)
             if let first = res.tracks.first {
                 player.play(track: first, queue: res.tracks)
-                library.showToast("Playing & saved \"\(res.title)\" (\(res.tracks.count) tracks)")
-                await library.refreshAll()
+                library.showToast("Playing & saved \"\(col.title)\" (\(res.tracks.count) tracks)")
             }
         } catch {
             library.showToast(error.localizedDescription)
@@ -318,9 +326,8 @@ struct SearchView: View {
         importingId = col.id
         defer { importingId = nil }
         do {
-            let res = try await APIClient.shared.importCollection(col, savePlaylist: true)
-            library.showToast("Saved playlist \"\(res.title)\" (\(res.tracks.count) tracks)")
-            await library.refreshAll()
+            let res = try await library.importCollection(col, savePlaylist: true)
+            library.showToast("Saved playlist \"\(col.title)\" (\(res.tracks.count) tracks)")
         } catch {
             library.showToast(error.localizedDescription)
         }
@@ -425,7 +432,7 @@ private struct OnlineTrackRow: View {
                             .foregroundStyle(Theme.accent)
                             .clipShape(RoundedRectangle(cornerRadius: 3))
 
-                        Text(item.album?.isEmpty == false ? "\(item.artist) • \(item.album!)" : item.artist)
+                        Text((item.album?.isEmpty == false) ? "\(item.artist) • \(item.album ?? "")" : item.artist)
                             .font(.caption)
                             .foregroundStyle(Theme.textSecondary)
                             .lineLimit(1)

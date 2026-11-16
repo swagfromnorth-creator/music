@@ -41,57 +41,126 @@ final class OfflineStore: ObservableObject {
 
     func download(track: TrackRecord) async {
         guard !downloadingIds.contains(track.id) else { return }
-        guard let streamURL = APIClient.shared.streamURL(trackId: track.id, compatMp3: false) else {
-            lastError = "Configure your server URL before downloading tracks."
-            return
-        }
-
         downloadingIds.insert(track.id)
         defer { downloadingIds.remove(track.id) }
 
-        do {
-            var (tempURL, response) = try await URLSession.shared.download(from: streamURL)
-            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                throw APIError.httpError((response as? HTTPURLResponse)?.statusCode ?? 0, "Download failed.")
+        let candidates = track.links.isEmpty
+            ? (track.primaryUrl.map { [TrackLink(url: $0, host: track.primaryHost, playable: true)] } ?? [])
+            : track.links.filter { $0.playable }
+
+        guard !candidates.isEmpty else {
+            lastError = "No playable mirrors found for \"\(track.title)\"."
+            return
+        }
+
+        var errorSummary: String?
+        for link in candidates {
+            let resolved = await HostResolverService.shared.resolve(url: link.url)
+            guard resolved.ok, let targetStr = resolved.downloadableUrl ?? resolved.resolvedUrl,
+                  let targetURL = URL(string: targetStr) else {
+                errorSummary = resolved.errorMessage
+                continue
             }
 
-            var mime = (http.mimeType ?? track.resolvedMime ?? "").lowercased()
-            var ext = Self.extensionFor(mime: mime, fallbackHint: track.formatHint ?? track.resolvedFilename)
-
-            // AVPlayer cannot play raw OGG/WebM offline files directly — fetch MP3 compat transcode instead
-            if ext == "ogg" || ext == "webm" || ext == "opus" {
-                try? FileManager.default.removeItem(at: tempURL)
-                guard let mp3URL = APIClient.shared.streamURL(trackId: track.id, compatMp3: true) else { return }
-                let (mp3Temp, mp3Res) = try await URLSession.shared.download(from: mp3URL)
-                guard let mp3Http = mp3Res as? HTTPURLResponse, (200...299).contains(mp3Http.statusCode) else {
-                    throw APIError.httpError((mp3Res as? HTTPURLResponse)?.statusCode ?? 0, "Compat transcode download failed.")
+            // HLS playlists (.m3u8) aren't plain single-file downloads; check whether progressive URL or segment stitching works
+            if targetStr.lowercased().contains(".m3u8") {
+                do {
+                    let stitched = try await downloadHLSAudioSegments(playlistURL: targetURL, headers: resolved.httpHeaders, trackId: track.id)
+                    saveDownloadedFile(track: track, sourceTempURL: stitched.tempFile, ext: stitched.ext)
+                    lastError = nil
+                    return
+                } catch {
+                    errorSummary = "HLS stream is stream-only or unavailable for offline saving (\(error.localizedDescription))."
+                    continue
                 }
-                tempURL = mp3Temp
-                mime = mp3Http.mimeType ?? "audio/mpeg"
-                ext = "mp3"
             }
 
-            let filename = "\(track.id).\(ext)"
-            let destURL = folderURL.appendingPathComponent(filename)
-            if FileManager.default.fileExists(atPath: destURL.path) {
-                try FileManager.default.removeItem(at: destURL)
-            }
-            try FileManager.default.moveItem(at: tempURL, to: destURL)
+            do {
+                var req = URLRequest(url: targetURL)
+                for (k, v) in (resolved.httpHeaders ?? [:]) {
+                    req.setValue(v, forHTTPHeaderField: k)
+                }
+                let (tempURL, response) = try await URLSession.shared.download(for: req)
+                guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                    try? FileManager.default.removeItem(at: tempURL)
+                    errorSummary = "Host returned HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)."
+                    continue
+                }
 
+                let mime = (http.mimeType ?? resolved.mimeType ?? "").lowercased()
+                let ext = Self.extensionFor(mime: mime, fallbackHint: resolved.formatHint ?? track.formatHint ?? link.url)
+                saveDownloadedFile(track: track, sourceTempURL: tempURL, ext: ext)
+                lastError = nil
+                return
+            } catch {
+                errorSummary = error.localizedDescription
+            }
+        }
+
+        lastError = errorSummary ?? "Could not save track offline."
+    }
+
+    private func saveDownloadedFile(track: TrackRecord, sourceTempURL: URL, ext: String) {
+        let filename = "\(track.id).\(ext)"
+        let destURL = folderURL.appendingPathComponent(filename)
+        try? FileManager.default.removeItem(at: destURL)
+        do {
+            try FileManager.default.moveItem(at: sourceTempURL, to: destURL)
             let attrs = try FileManager.default.attributesOfItem(atPath: destURL.path)
             let bytes = (attrs[.size] as? NSNumber)?.int64Value ?? 0
-
-            entries[track.id] = OfflineTrackEntry(
-                track: track,
-                localFilename: filename,
-                fileSizeBytes: bytes,
-                downloadedAt: Date()
-            )
+            entries[track.id] = OfflineTrackEntry(track: track, localFilename: filename, fileSizeBytes: bytes, downloadedAt: Date())
             saveManifest()
-            lastError = nil
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    private func downloadHLSAudioSegments(playlistURL: URL, headers: [String: String]?, trackId: String) async throws -> (tempFile: URL, ext: String) {
+        var req = URLRequest(url: playlistURL)
+        for (k, v) in (headers ?? [:]) { req.setValue(v, forHTTPHeaderField: k) }
+        let (data, _) = try await URLSession.shared.data(for: req)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        if text.contains("#EXT-X-KEY") {
+            throw NSError(domain: "OfflineStore", code: 403, userInfo: [NSLocalizedDescriptionKey: "Encrypted HLS stream"])
+        }
+
+        // If master playlist, follow first variant URL
+        let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        if text.contains("#EXT-X-STREAM-INF"), let variant = lines.first(where: { !$0.hasPrefix("#") }),
+           let variantURL = URL(string: variant, relativeTo: playlistURL) {
+            return try await downloadHLSAudioSegments(playlistURL: variantURL, headers: headers, trackId: trackId)
+        }
+
+        var segmentURLs: [URL] = []
+        var isMp4Init = false
+        for line in lines {
+            if line.hasPrefix("#EXT-X-MAP:URI=\"") {
+                isMp4Init = true
+                let raw = line.replacingOccurrences(of: "#EXT-X-MAP:URI=\"", with: "").replacingOccurrences(of: "\"", with: "")
+                if let u = URL(string: raw, relativeTo: playlistURL) { segmentURLs.append(u) }
+            } else if !line.hasPrefix("#") {
+                if let u = URL(string: line, relativeTo: playlistURL) { segmentURLs.append(u) }
+            }
+        }
+        guard !segmentURLs.isEmpty else {
+            throw NSError(domain: "OfflineStore", code: 404, userInfo: [NSLocalizedDescriptionKey: "Empty HLS playlist"])
+        }
+
+        let tempOut = FileManager.default.temporaryDirectory.appendingPathComponent("\(trackId)_stitch")
+        try? FileManager.default.removeItem(at: tempOut)
+        FileManager.default.createFile(atPath: tempOut.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: tempOut)
+        defer { try? handle.close() }
+
+        for segURL in segmentURLs {
+            var segReq = URLRequest(url: segURL)
+            for (k, v) in (headers ?? [:]) { segReq.setValue(v, forHTTPHeaderField: k) }
+            let (segData, _) = try await URLSession.shared.data(for: segReq)
+            try handle.write(contentsOf: segData)
+        }
+
+        let ext = isMp4Init || segmentURLs.first?.pathExtension.lowercased() == "m4s" ? "m4a" : "aac"
+        return (tempOut, ext)
     }
 
     func removeDownload(trackId: String) {
@@ -132,10 +201,8 @@ final class OfflineStore: ObservableObject {
         if mime.contains("mp4") || mime.contains("m4a") || mime.contains("aac") { return "m4a" }
         if mime.contains("mpeg") || mime.contains("mp3") { return "mp3" }
         if mime.contains("ogg") { return "ogg" }
-        if mime.contains("webm") { return "webm" }
-        if mime.contains("opus") { return "opus" }
         let hint = (fallbackHint ?? "").lowercased()
-        for ext in ["flac", "m4a", "mp3", "wav", "aac", "ogg", "webm"] where hint.contains(ext) {
+        for ext in ["flac", "m4a", "mp3", "wav", "aac"] where hint.contains(ext) {
             return ext
         }
         return "m4a"

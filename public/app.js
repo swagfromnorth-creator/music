@@ -438,10 +438,6 @@ const el = {
   clearAllCacheBtn: $("clearAllCacheBtn"),
   cacheEntriesList: $("cacheEntriesList"),
   cookiesBrowserSelect: $("cookiesBrowserSelect"),
-  lanStatusText: $("lanStatusText"),
-  lanAccessToggle: $("lanAccessToggle"),
-  restartLanBtn: $("restartLanBtn"),
-  lanUrlsList: $("lanUrlsList"),
   updateStatusText: $("updateStatusText"),
   checkUpdateBtn: $("checkUpdateBtn"),
   applyUpdateBtn: $("applyUpdateBtn"),
@@ -3181,14 +3177,12 @@ function bindEvents() {
     await refreshCacheStats();
     if (state.cacheStats) renderCacheModal(state.cacheStats);
     void refreshUpdateStatus(false);
-    void refreshNetworkSettings();
   });
   el.sidebarCacheSummary.addEventListener("click", async () => {
     el.cacheModal.classList.remove("hidden");
     await refreshCacheStats();
     if (state.cacheStats) renderCacheModal(state.cacheStats);
     void refreshUpdateStatus(false);
-    void refreshNetworkSettings();
   });
 
   // Mobile sidebar
@@ -4275,37 +4269,6 @@ function bindEvents() {
     }
   });
 
-  // Network & iPhone LAN access controls
-  el.lanAccessToggle?.addEventListener("change", async () => {
-    try {
-      const res = await apiJson("/api/settings/network", {
-        method: "POST",
-        body: JSON.stringify({ allowLanAccess: Boolean(el.lanAccessToggle.checked) }),
-      });
-      renderNetworkSettings(res);
-      showToast(
-        res.needsRestart
-          ? "Saved LAN setting — click Restart Server to apply."
-          : res.allowLanAccess
-            ? "iPhone / LAN access enabled."
-            : "Restricted to localhost only.",
-        "info"
-      );
-    } catch (err) {
-      showToast(err.message, "error");
-    }
-  });
-
-  el.restartLanBtn?.addEventListener("click", async () => {
-    try {
-      await apiJson("/api/update/restart", { method: "POST", body: "{}" });
-      if (el.lanStatusText) el.lanStatusText.textContent = "Restarting server...";
-      setTimeout(() => location.reload(), 1800);
-    } catch (err) {
-      showToast(`Restart failed: ${err.message}`, "error");
-    }
-  });
-
   // GitHub auto-updater controls
   el.checkUpdateBtn.addEventListener("click", () => refreshUpdateStatus(false));
 
@@ -4401,55 +4364,6 @@ function bindEvents() {
 /* ==================== GITHUB AUTO-UPDATER ==================== */
 let bootCommit = null;
 let pendingFrontendReload = false;
-
-function renderNetworkSettings(data) {
-  if (!data || !el.lanStatusText) return;
-  if (el.lanAccessToggle) el.lanAccessToggle.checked = Boolean(data.allowLanAccess);
-  if (el.restartLanBtn) el.restartLanBtn.classList.toggle("hidden", !data.needsRestart);
-
-  const isListeningAll = data.boundHost === "0.0.0.0";
-  if (data.allowLanAccess) {
-    el.lanStatusText.textContent = isListeningAll
-      ? `Enter one of these URLs into the VaultStream iPhone app (same Wi-Fi or Tailscale):`
-      : `Enabled — click Restart Server to bind ${data.port} for iPhone access.`;
-  } else {
-    el.lanStatusText.textContent = "LAN access disabled (localhost only).";
-  }
-
-  if (el.lanUrlsList) {
-    const urls = Array.isArray(data.interfaces) ? data.interfaces : [];
-    if (!data.allowLanAccess || urls.length === 0) {
-      el.lanUrlsList.innerHTML = `<span class="small muted">${data.allowLanAccess ? "No LAN IPv4 addresses detected." : ""}</span>`;
-      return;
-    }
-    el.lanUrlsList.innerHTML = urls
-      .map(
-        (u) =>
-          `<button type="button" class="pill-btn" data-copy-lan="${escapeHtml(u.url)}" title="${escapeHtml(u.name)}">${escapeHtml(u.url)} · Copy</button>`
-      )
-      .join("");
-    el.lanUrlsList.querySelectorAll("[data-copy-lan]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const val = btn.getAttribute("data-copy-lan") || "";
-        try {
-          await navigator.clipboard.writeText(val);
-          showToast(`Copied ${val} for iPhone app!`, "success");
-        } catch {
-          showToast(val, "info");
-        }
-      });
-    });
-  }
-}
-
-async function refreshNetworkSettings() {
-  try {
-    const data = await apiJson("/api/settings/network");
-    renderNetworkSettings(data);
-  } catch {
-    if (el.lanStatusText) el.lanStatusText.textContent = "Network status unavailable.";
-  }
-}
 
 async function refreshUpdateStatus(notifyToast = false) {
   try {

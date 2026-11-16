@@ -68,9 +68,8 @@ struct LibraryView: View {
                 Button("Create") {
                     let clean = newPlaylistName.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !clean.isEmpty else { return }
-                    Task {
-                        _ = await library.createPlaylist(name: clean, description: newPlaylistDesc)
-                    }
+                    library.createPlaylist(name: clean, description: newPlaylistDesc)
+                    library.showToast("Created \"\(clean)\"")
                 }
                 Button("Cancel", role: .cancel) {}
             }
@@ -115,10 +114,7 @@ struct LibraryView: View {
                     .listRowBackground(Theme.surface)
                     .swipeActions(edge: .trailing) {
                         Button(role: .destructive) {
-                            Task {
-                                try? await APIClient.shared.deletePlaylist(id: playlist.id)
-                                await library.refreshAll()
-                            }
+                            library.deletePlaylist(id: playlist.id)
                         } label: {
                             Label("Delete", systemImage: "trash")
                         }
@@ -130,9 +126,6 @@ struct LibraryView: View {
         .scrollContentBackground(.hidden)
         .navigationDestination(for: PlaylistRecord.self) { pl in
             PlaylistDetailView(playlist: pl)
-        }
-        .refreshable {
-            await library.refreshAll()
         }
     }
 
@@ -154,9 +147,6 @@ struct LibraryView: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
-        .refreshable {
-            await library.refreshAll()
-        }
     }
 
     private var offlineContent: some View {
@@ -169,7 +159,7 @@ struct LibraryView: View {
                         Text("\(entries.count) Songs Stored on iPhone")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(Theme.textPrimary)
-                        Text("Plays anywhere without PC or internet (\(Formatters.bytes(offline.totalBytes)))")
+                        Text("Plays in Airplane Mode (\(Formatters.bytes(offline.totalBytes)))")
                             .font(.caption)
                             .foregroundStyle(Theme.textSecondary)
                     }
@@ -232,9 +222,6 @@ struct LibraryView: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
-        .refreshable {
-            await library.refreshAll()
-        }
     }
 }
 
@@ -245,29 +232,31 @@ struct PlaylistDetailView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var offline: OfflineStore
 
-    @State private var detail: PlaylistDetail?
-    @State private var isLoading = true
     @State private var isDownloadingAll = false
 
+    private var livePlaylist: PlaylistRecord {
+        library.playlists.first(where: { $0.id == playlist.id }) ?? playlist
+    }
+
     private var tracks: [TrackRecord] {
-        detail?.tracks ?? []
+        library.playlistTracks(for: playlist.id)
     }
 
     var body: some View {
         List {
             Section {
                 VStack(spacing: 14) {
-                    PlaylistCoverView(playlist: playlist, size: 150, cornerRadius: 16)
+                    PlaylistCoverView(playlist: livePlaylist, size: 150, cornerRadius: 16)
                         .shadow(color: .black.opacity(0.45), radius: 14, y: 8)
 
                     VStack(spacing: 4) {
-                        Text(detail?.name ?? playlist.name)
+                        Text(livePlaylist.name)
                             .font(.title2.weight(.bold))
                             .foregroundStyle(Theme.textPrimary)
                             .multilineTextAlignment(.center)
 
-                        if !(detail?.description ?? playlist.description).isEmpty {
-                            Text(detail?.description ?? playlist.description)
+                        if !livePlaylist.description.isEmpty {
+                            Text(livePlaylist.description)
                                 .font(.caption)
                                 .foregroundStyle(Theme.textSecondary)
                                 .multilineTextAlignment(.center)
@@ -323,13 +312,8 @@ struct PlaylistDetailView: View {
                 .listRowBackground(Color.clear)
             }
 
-            if isLoading {
-                ProgressView("Loading playlist...")
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 24)
-                    .listRowBackground(Color.clear)
-            } else if tracks.isEmpty {
-                Text("This playlist is empty. Add any track using its context menu.")
+            if tracks.isEmpty {
+                Text("This playlist is empty. Add any song from its context menu.")
                     .font(.subheadline)
                     .foregroundStyle(Theme.textSecondary)
                     .listRowBackground(Theme.surface)
@@ -339,7 +323,7 @@ struct PlaylistDetailView: View {
                         .listRowBackground(Theme.surface)
                         .swipeActions(edge: .trailing) {
                             Button(role: .destructive) {
-                                Task { await removeTrack(track) }
+                                library.removeTrack(track.id, fromPlaylist: playlist.id)
                             } label: {
                                 Label("Remove", systemImage: "trash")
                             }
@@ -350,27 +334,8 @@ struct PlaylistDetailView: View {
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
         .background(Theme.background)
-        .navigationTitle(playlist.name)
+        .navigationTitle(livePlaylist.name)
         .navigationBarTitleDisplayMode(.inline)
-        .task {
-            await loadDetail()
-        }
-        .refreshable {
-            await loadDetail()
-        }
-    }
-
-    private func loadDetail() async {
-        isLoading = detail == nil
-        defer { isLoading = false }
-        detail = try? await APIClient.shared.fetchPlaylistDetail(id: playlist.id)
-    }
-
-    private func removeTrack(_ track: TrackRecord) async {
-        if let updated = try? await APIClient.shared.removeTrackFromPlaylist(playlistId: playlist.id, trackId: track.id) {
-            detail = updated
-            await library.refreshAll()
-        }
     }
 
     private func downloadEntirePlaylist() async {

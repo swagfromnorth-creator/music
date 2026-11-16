@@ -19,11 +19,6 @@ struct HomeView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    // Connection banner if disconnected
-                    if !library.isConnected {
-                        disconnectedCard
-                    }
-
                     // Quick 2x2 shortcut grid
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
                         NavigationLink {
@@ -53,7 +48,7 @@ struct HomeView: View {
                         } label: {
                             QuickTile(
                                 title: "Lossless Vault",
-                                subtitle: "\(library.losslessTracks.count)+ Hi-Res",
+                                subtitle: "\(library.losslessTracks.count) Hi-Res",
                                 icon: "hifispeaker.fill",
                                 gradient: [Color(hex: "#0284c7"), Color(hex: "#1e3a8a")]
                             )
@@ -69,6 +64,10 @@ struct HomeView: View {
                                 gradient: [Color(hex: "#db2777"), Color(hex: "#831843")]
                             )
                         }
+                    }
+
+                    if library.allTracks.isEmpty && library.trackers.isEmpty {
+                        welcomeCard
                     }
 
                     // Recently Played Horizontal Shelf
@@ -174,20 +173,7 @@ struct HomeView: View {
             .navigationDestination(for: TrackerRecord.self) { tracker in
                 ArtistDetailView(tracker: tracker)
             }
-            .refreshable {
-                await library.refreshAll()
-            }
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(library.isConnected ? Theme.accent : Theme.danger)
-                            .frame(width: 8, height: 8)
-                        Text(library.isConnected ? "PC Connected" : "Offline")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         showImportSheet = true
@@ -213,41 +199,39 @@ struct HomeView: View {
         }
     }
 
-    private var disconnectedCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: "wifi.exclamationmark")
-                    .foregroundStyle(Theme.violet)
-                Text("PC Server Offline — Offline Mode Ready")
-                    .font(.subheadline.weight(.bold))
+    private var welcomeCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "waveform.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(Theme.accent)
+                Text("VaultStream Standalone")
+                    .font(.headline.weight(.bold))
                     .foregroundStyle(Theme.textPrimary)
             }
-            Text(library.connectionError ?? "You can still play all songs saved offline on your iPhone, or connect to your PC URL in Settings.")
+            Text("Stream lossless ArtistGrid trackers, YouTube Music, YouTube, and SoundCloud directly on your iPhone — or save tracks for Airplane Mode.")
                 .font(.caption)
                 .foregroundStyle(Theme.textSecondary)
 
-            HStack {
-                Button("Reconnect") {
-                    Task { await library.refreshAll() }
+            HStack(spacing: 10) {
+                Button("Search Music") {
+                    selectedTab = .search
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
 
-                Button("Settings") {
-                    selectedTab = .settings
+                Button("Sync ArtistGrid") {
+                    showImportSheet = true
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             }
         }
-        .padding(14)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Theme.border, lineWidth: 1)
-        )
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Theme.border, lineWidth: 1))
     }
 }
 

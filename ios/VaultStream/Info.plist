@@ -26,11 +26,7 @@
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
-		<key>NSAllowsLocalNetworking</key>
-		<true/>
 	</dict>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>VaultStream connects to your VaultStream PC server over local Wi-Fi or Tailscale to stream audio and sync playlists.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

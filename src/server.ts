@@ -50,32 +50,6 @@ const STATIC_MIME: Record<string, string> = {
   ".ico": "image/x-icon",
 };
 
-function getLanAddresses(port: number): Array<{ name: string; address: string; url: string }> {
-  const nets = os.networkInterfaces();
-  const results: Array<{ name: string; address: string; url: string }> = [];
-  for (const [name, entries] of Object.entries(nets)) {
-    for (const entry of entries ?? []) {
-      if (entry.family !== "IPv4" || entry.internal) continue;
-      if (entry.address.startsWith("169.254.")) continue;
-      results.push({
-        name,
-        address: entry.address,
-        url: `http://${entry.address}:${port}`,
-      });
-    }
-  }
-  return results.sort((a, b) => {
-    const score = (addr: string) =>
-      addr.startsWith("192.168.") ? 0 : addr.startsWith("10.") ? 1 : addr.startsWith("100.") ? 2 : 3;
-    return score(a.address) - score(b.address);
-  });
-}
-
-function isLoopbackRequest(req: IncomingMessage): boolean {
-  const remote = req.socket.remoteAddress ?? "";
-  return remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
-}
-
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
@@ -213,7 +187,6 @@ export interface AppContext {
   server: http.Server;
   getCommit: () => string | null;
   setCommit: (c: string | null) => void;
-  setBoundHost: (host: string) => void;
   close: () => Promise<void>;
 }
 
@@ -224,7 +197,6 @@ export function createAppServer(options: {
   fetchImpl?: FetchLike;
   publicDir?: string;
   initialCommit?: string | null;
-  boundHost?: string;
 } = {}): AppContext {
   const dbPath = options.dbPath ?? DB_PATH;
   const db = new AppDatabase(dbPath);
@@ -249,7 +221,6 @@ export function createAppServer(options: {
   const publicDir = options.publicDir ?? PUBLIC_DIR;
 
   let currentCommit: string | null = options.initialCommit ?? null;
-  let currentBoundHost = options.boundHost ?? HOST;
   let lastAutoUpdateCheck = 0;
   let lastAutoUpdateError: string | null = null;
   let directoryCache: { fetchedAt: number; artists: DirectoryArtist[] } | null = null;
@@ -848,7 +819,6 @@ export function createAppServer(options: {
         });
 
         const compat = parsedUrl.searchParams.get("compat") === "1";
-        const forceMp3 = parsedUrl.searchParams.get("format") === "mp3";
         const linkIdxParam = parsedUrl.searchParams.get("linkIndex");
         const linkIndex = linkIdxParam !== null ? Number(linkIdxParam) : undefined;
         const { sourceUrl, resolution } = await resolveTrackLink(track, { linkIndex });
@@ -868,7 +838,6 @@ export function createAppServer(options: {
           if (compat) {
             await streamTranscodedAudio(localPath, res, {
               lossless: Boolean(track.audioMeta?.lossless),
-              forceMp3,
             });
           } else {
             await cache.streamLocalFile(localPath, req, res, resolution.mimeType);
@@ -880,7 +849,6 @@ export function createAppServer(options: {
           const cachedPath = await cache.getCompleteCachedFile(sourceUrl);
           await streamTranscodedAudio(cachedPath ?? resolution.resolvedUrl, res, {
             lossless: Boolean(track.audioMeta?.lossless),
-            forceMp3,
             httpHeaders: cachedPath ? undefined : resolution.httpHeaders,
           });
           return;
@@ -1286,42 +1254,6 @@ export function createAppServer(options: {
         return;
       }
 
-      // Network & iPhone LAN access settings
-      if (method === "GET" && pathname === "/api/settings/network") {
-        const allowLanAccess = db.getAllowLanAccess();
-        const interfaces = getLanAddresses(PORT);
-        sendJson(res, 200, {
-          allowLanAccess,
-          port: PORT,
-          boundHost: currentBoundHost,
-          lanUrls: interfaces.map((i) => i.url),
-          interfaces,
-        });
-        return;
-      }
-
-      if (method === "POST" && pathname === "/api/settings/network") {
-        if (!isLoopbackRequest(req)) {
-          sendJson(res, 403, { error: "Network settings can only be changed from localhost." });
-          return;
-        }
-        const body = await readJsonBody<{ allowLanAccess?: boolean }>(req);
-        const allowLanAccess = db.setAllowLanAccess(Boolean(body.allowLanAccess));
-        const expectedHost = process.env.HOST ?? (allowLanAccess ? "0.0.0.0" : HOST);
-        const needsRestart = expectedHost !== currentBoundHost;
-        const interfaces = getLanAddresses(PORT);
-        sendJson(res, 200, {
-          allowLanAccess,
-          port: PORT,
-          boundHost: currentBoundHost,
-          expectedHost,
-          needsRestart,
-          lanUrls: interfaces.map((i) => i.url),
-          interfaces,
-        });
-        return;
-      }
-
       // MusicBrainz + Cover Art Archive metadata normalizer
       if (method === "POST" && pathname === "/api/metadata/musicbrainz") {
         const body = await readJsonBody<{
@@ -1581,7 +1513,10 @@ export function createAppServer(options: {
       }
 
       // GitHub auto-update endpoints (loopback only)
-      const isLoopback = isLoopbackRequest(req);
+      const isLoopback =
+        req.socket.remoteAddress === "127.0.0.1" ||
+        req.socket.remoteAddress === "::1" ||
+        req.socket.remoteAddress === "::ffff:127.0.0.1";
 
       if (method === "GET" && pathname === "/api/update/status") {
         const status = await checkForUpdates();
@@ -1670,9 +1605,6 @@ export function createAppServer(options: {
     setCommit: (c) => {
       currentCommit = c;
     },
-    setBoundHost: (h) => {
-      currentBoundHost = h;
-    },
     close: async () => {
       server.closeAllConnections?.();
       await new Promise<void>((resolve, reject) => {
@@ -1717,18 +1649,9 @@ async function listenWithRetry(server: http.Server, port: number, host: string):
 if (isEntrypoint) {
   const initialCommit = await getCurrentCommit();
   const ctx = createAppServer({ initialCommit });
-  const allowLan = ctx.db.getAllowLanAccess();
-  const effectiveHost = process.env.HOST ?? (allowLan ? "0.0.0.0" : HOST);
-  ctx.setBoundHost(effectiveHost);
-  await listenWithRetry(ctx.server, PORT, effectiveHost);
+  await listenWithRetry(ctx.server, PORT, HOST);
 
-  console.log(`Lossless Tracker Player listening at http://${effectiveHost}:${PORT}`);
-  if (allowLan && !process.env.HOST) {
-    const lan = getLanAddresses(PORT);
-    if (lan.length > 0) {
-      console.log(`iPhone / LAN access: ${lan.map((l) => l.url).join(", ")}`);
-    }
-  }
+  console.log(`Lossless Tracker Player listening at http://${HOST}:${PORT}`);
   console.log(`SQLite FTS5 DB: ${DB_PATH}`);
   console.log(`LRU Disk Cache: ${CACHE_DIR}`);
   if (initialCommit) console.log(`Git commit: ${initialCommit}`);

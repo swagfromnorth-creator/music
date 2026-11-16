@@ -41,11 +41,11 @@ final class AudioPlayerManager: ObservableObject {
     private var rateObserver: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
     private var failedObserver: NSObjectProtocol?
-    private var isAttemptingCompatFallback = false
     private var isUserScrubbing = false
     private var artworkTask: Task<Void, Never>?
-
-    var onTrackUnavailableChanged: ((String, Bool) -> Void)?
+    private var resolveTask: Task<Void, Never>?
+    private var activeCandidateLinks: [TrackLink] = []
+    private var activeMirrorCursor: Int = 0
 
     private init() {
         configureAudioSession()
@@ -69,9 +69,7 @@ final class AudioPlayerManager: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self, !self.isUserScrubbing else { return }
                 let secs = cmTime.seconds
-                if secs.isFinite && secs >= 0 {
-                    self.currentTime = secs
-                }
+                if secs.isFinite && secs >= 0 { self.currentTime = secs }
                 if let itemDur = self.player.currentItem?.duration.seconds, itemDur.isFinite, itemDur > 0 {
                     self.duration = itemDur
                 }
@@ -120,7 +118,7 @@ final class AudioPlayerManager: ObservableObject {
                 guard let self,
                       let item = notification.object as? AVPlayerItem,
                       item == self.player.currentItem else { return }
-                await self.handlePlaybackFailure(error: item.error)
+                await self.tryNextMirrorOrFail(reason: item.error?.localizedDescription)
             }
         }
     }
@@ -178,8 +176,7 @@ final class AudioPlayerManager: ObservableObject {
             currentIndex = idx
         }
 
-        isAttemptingCompatFallback = false
-        startPlayback(of: track, compatMp3: false, linkIndex: linkIndex)
+        startTrackResolutionAndPlayback(track: track, specificLinkIndex: linkIndex)
     }
 
     func playNext(_ track: TrackRecord) {
@@ -193,29 +190,97 @@ final class AudioPlayerManager: ObservableObject {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 
-    private func startPlayback(of track: TrackRecord, compatMp3: Bool, linkIndex: Int?) {
+    private func startTrackResolutionAndPlayback(track: TrackRecord, specificLinkIndex: Int?) {
+        resolveTask?.cancel()
         configureAudioSession()
         currentTrack = track
         errorMessage = nil
         isLoading = true
         currentTime = 0
         duration = track.audioMeta?.durationSec ?? 0
+        publishNowPlayingInfo(for: track)
 
-        let playbackURL: URL?
-        if let offlineURL = OfflineStore.shared.localURL(for: track.id) {
-            playbackURL = offlineURL
-        } else {
-            playbackURL = APIClient.shared.streamURL(trackId: track.id, compatMp3: compatMp3, linkIndex: linkIndex)
-        }
-
-        guard let url = playbackURL else {
-            isLoading = false
-            errorMessage = "Configure your VaultStream server URL in Settings to stream."
+        // 1) Play offline file immediately if saved on iPhone
+        if specificLinkIndex == nil, let offlineURL = OfflineStore.shared.localURL(for: track.id) {
+            activeCandidateLinks = []
+            startAssetPlayback(track: track, url: offlineURL, httpHeaders: nil)
             return
         }
 
+        let allLinks: [TrackLink]
+        if let specificLinkIndex, specificLinkIndex >= 0, specificLinkIndex < track.links.count {
+            allLinks = [track.links[specificLinkIndex]]
+        } else if !track.links.isEmpty {
+            allLinks = track.links.filter { $0.playable }
+        } else if let primary = track.primaryUrl {
+            allLinks = [TrackLink(url: primary, host: track.primaryHost, playable: true)]
+        } else {
+            allLinks = []
+        }
+
+        guard !allLinks.isEmpty else {
+            isLoading = false
+            errorMessage = "No playable links available for \"\(track.title)\"."
+            LibraryStore.shared.setTrackAvailability(track.id, unavailable: true)
+            return
+        }
+
+        activeCandidateLinks = allLinks
+        activeMirrorCursor = 0
+
+        resolveTask = Task {
+            await resolveAndStartCursor(track: track)
+        }
+    }
+
+    private func resolveAndStartCursor(track: TrackRecord) async {
+        while activeMirrorCursor < activeCandidateLinks.count {
+            if Task.isCancelled || currentTrack?.id != track.id { return }
+            let link = activeCandidateLinks[activeMirrorCursor]
+            let res = await HostResolverService.shared.resolve(url: link.url)
+            if Task.isCancelled || currentTrack?.id != track.id { return }
+
+            if res.ok, let urlStr = res.resolvedUrl, let targetURL = URL(string: urlStr) {
+                startAssetPlayback(track: track, url: targetURL, httpHeaders: res.httpHeaders)
+                return
+            }
+            activeMirrorCursor += 1
+        }
+
+        isLoading = false
+        isPlaying = false
+        errorMessage = "All mirrors failed for \"\(track.title)\". Marked unavailable."
+        LibraryStore.shared.setTrackAvailability(track.id, unavailable: true)
+    }
+
+    private func tryNextMirrorOrFail(reason: String?) async {
+        guard let track = currentTrack else { return }
+        activeMirrorCursor += 1
+        if activeMirrorCursor < activeCandidateLinks.count {
+            await resolveAndStartCursor(track: track)
+            return
+        }
+
+        isLoading = false
+        isPlaying = false
+        errorMessage = reason ?? "Could not play \"\(track.title)\"."
+        LibraryStore.shared.setTrackAvailability(track.id, unavailable: true)
+    }
+
+    private func startAssetPlayback(track: TrackRecord, url: URL, httpHeaders: [String: String]?) {
         statusObserver?.invalidate()
-        let item = AVPlayerItem(url: url)
+
+        var options: [String: Any] = [:]
+        if let ua = httpHeaders?["User-Agent"], !ua.isEmpty {
+            options[AVURLAssetHTTPUserAgentKey] = ua
+        }
+        if let httpHeaders, !httpHeaders.isEmpty {
+            options["AVURLAssetHTTPHeaderFieldsKey"] = httpHeaders
+        }
+
+        let asset = options.isEmpty ? AVURLAsset(url: url) : AVURLAsset(url: url, options: options)
+        let item = AVPlayerItem(asset: asset)
+
         statusObserver = item.observe(\.status, options: [.new]) { [weak self] playerItem, _ in
             Task { @MainActor [weak self] in
                 guard let self, playerItem == self.player.currentItem else { return }
@@ -224,17 +289,14 @@ final class AudioPlayerManager: ObservableObject {
                     self.isLoading = false
                     self.errorMessage = nil
                     let secs = playerItem.asset.duration.seconds
-                    if secs.isFinite && secs > 0 {
-                        self.duration = secs
-                    }
+                    if secs.isFinite && secs > 0 { self.duration = secs }
                     self.publishNowPlayingInfo(for: track)
                     if track.unavailableFlag {
-                        _ = await APIClient.shared.setTrackAvailability(trackId: track.id, unavailable: false)
-                        self.onTrackUnavailableChanged?(track.id, false)
+                        LibraryStore.shared.setTrackAvailability(track.id, unavailable: false)
                     }
-                    await APIClient.shared.recordPlay(trackId: track.id)
+                    LibraryStore.shared.recordPlay(track: track)
                 case .failed:
-                    await self.handlePlaybackFailure(error: playerItem.error)
+                    await self.tryNextMirrorOrFail(reason: playerItem.error?.localizedDescription)
                 default:
                     break
                 }
@@ -246,27 +308,8 @@ final class AudioPlayerManager: ObservableObject {
         publishNowPlayingInfo(for: track)
     }
 
-    private func handlePlaybackFailure(error: Error?) async {
-        guard let track = currentTrack else { return }
-        if !isAttemptingCompatFallback, OfflineStore.shared.localURL(for: track.id) == nil {
-            isAttemptingCompatFallback = true
-            startPlayback(of: track, compatMp3: true, linkIndex: nil)
-            return
-        }
-
-        isLoading = false
-        isPlaying = false
-        errorMessage = error?.localizedDescription ?? "Could not play \"\(track.title)\". Marked unavailable."
-        _ = await APIClient.shared.setTrackAvailability(trackId: track.id, unavailable: true)
-        onTrackUnavailableChanged?(track.id, true)
-    }
-
     func togglePlayPause() {
-        if isPlaying {
-            pause()
-        } else {
-            resume()
-        }
+        if isPlaying { pause() } else { resume() }
     }
 
     func pause() {
@@ -290,9 +333,7 @@ final class AudioPlayerManager: ObservableObject {
         guard !queue.isEmpty else { return }
         if isShuffle && queue.count > 1 {
             var candidate = Int.random(in: 0..<queue.count)
-            if candidate == currentIndex {
-                candidate = (candidate + 1) % queue.count
-            }
+            if candidate == currentIndex { candidate = (candidate + 1) % queue.count }
             currentIndex = candidate
             play(track: queue[currentIndex])
             return
@@ -370,13 +411,11 @@ final class AudioPlayerManager: ObservableObject {
             MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
         ]
-        if duration > 0 {
-            info[MPMediaItemPropertyPlaybackDuration] = duration
-        }
+        if duration > 0 { info[MPMediaItemPropertyPlaybackDuration] = duration }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
 
         artworkTask?.cancel()
-        guard let artURL = APIClient.shared.artworkURL(track.eraImage) else { return }
+        guard let raw = track.eraImage, let artURL = URL(string: raw) else { return }
         let trackId = track.id
         artworkTask = Task { [weak self] in
             guard let (data, _) = try? await URLSession.shared.data(from: artURL),
@@ -395,9 +434,7 @@ final class AudioPlayerManager: ObservableObject {
         guard var info = MPNowPlayingInfoCenter.default().nowPlayingInfo else { return }
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentTime
         info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
-        if duration > 0 {
-            info[MPMediaItemPropertyPlaybackDuration] = duration
-        }
+        if duration > 0 { info[MPMediaItemPropertyPlaybackDuration] = duration }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
 }

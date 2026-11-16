@@ -1,4 +1,5 @@
 import SwiftUI
+import WebKit
 
 struct AddToPlaylistSheet: View {
     let track: TrackRecord
@@ -15,12 +16,10 @@ struct AddToPlaylistSheet: View {
                         Button("Create & Add") {
                             let clean = newName.trimmingCharacters(in: .whitespacesAndNewlines)
                             guard !clean.isEmpty else { return }
-                            Task {
-                                if let pl = await library.createPlaylist(name: clean) {
-                                    await library.addTrack(track, to: pl)
-                                    dismiss()
-                                }
-                            }
+                            let pl = library.createPlaylist(name: clean)
+                            _ = library.addTrack(track, toPlaylist: pl.id)
+                            library.showToast("Added \"\(track.title)\" to \(pl.name)")
+                            dismiss()
                         }
                         .disabled(newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
@@ -35,10 +34,13 @@ struct AddToPlaylistSheet: View {
                     } else {
                         ForEach(library.playlists) { playlist in
                             Button {
-                                Task {
-                                    await library.addTrack(track, to: playlist)
-                                    dismiss()
-                                }
+                                let added = library.addTrack(track, toPlaylist: playlist.id)
+                                library.showToast(
+                                    added
+                                        ? "Added \"\(track.title)\" to \(playlist.name)"
+                                        : "\"\(track.title)\" is already in \(playlist.name)"
+                                )
+                                dismiss()
                             } label: {
                                 HStack(spacing: 12) {
                                     PlaylistCoverView(playlist: playlist, size: 42, cornerRadius: 8)
@@ -84,38 +86,39 @@ struct TrackInspectorSheet: View {
     @State private var statusMessage: String?
     @State private var isWorking = false
 
+    private var liveTrack: TrackRecord {
+        library.tracksById[track.id] ?? track
+    }
+
     var body: some View {
         NavigationStack {
             List {
                 Section("Track") {
-                    LabeledContent("Title", value: track.title)
-                    LabeledContent("Artist", value: track.artist)
-                    if !track.era.isEmpty { LabeledContent("Era / Album", value: track.era) }
-                    if !track.quality.isEmpty { LabeledContent("Quality", value: track.quality) }
-                    if let meta = track.audioMeta?.summaryBadge {
+                    LabeledContent("Title", value: liveTrack.title)
+                    LabeledContent("Artist", value: liveTrack.artist)
+                    if !liveTrack.era.isEmpty { LabeledContent("Era / Album", value: liveTrack.era) }
+                    if !liveTrack.quality.isEmpty { LabeledContent("Quality", value: liveTrack.quality) }
+                    if let meta = liveTrack.audioMeta?.summaryBadge {
                         LabeledContent("Audio Stream", value: meta)
-                    }
-                    if let size = track.resolvedSize, size > 0 {
-                        LabeledContent("File Size", value: Formatters.bytes(size))
                     }
                 }
                 .listRowBackground(Theme.surface)
 
-                if !track.notes.isEmpty {
+                if !liveTrack.notes.isEmpty {
                     Section("Notes") {
-                        Text(track.notes)
+                        Text(liveTrack.notes)
                             .font(.caption)
                             .foregroundStyle(Theme.textSecondary)
                     }
                     .listRowBackground(Theme.surface)
                 }
 
-                Section("Mirrors & Links (\(track.links.count))") {
-                    if track.links.isEmpty {
+                Section("Mirrors & Links (\(liveTrack.links.count))") {
+                    if liveTrack.links.isEmpty {
                         Text("No mirror URLs stored.")
                             .foregroundStyle(Theme.textSecondary)
                     } else {
-                        ForEach(Array(track.links.enumerated()), id: \.offset) { idx, link in
+                        ForEach(Array(liveTrack.links.enumerated()), id: \.offset) { idx, link in
                             VStack(alignment: .leading, spacing: 6) {
                                 HStack {
                                     Text(link.host.uppercased())
@@ -128,7 +131,7 @@ struct TrackInspectorSheet: View {
                                     }
                                     Spacer()
                                     Button("Play Mirror #\(idx + 1)") {
-                                        player.play(track: track, linkIndex: idx)
+                                        player.play(track: liveTrack, linkIndex: idx)
                                         dismiss()
                                     }
                                     .buttonStyle(.borderedProminent)
@@ -147,36 +150,44 @@ struct TrackInspectorSheet: View {
 
                 Section("Actions") {
                     Button {
-                        Task { await resolvePrimaryLink() }
+                        Task { await probePrimaryMirror() }
                     } label: {
-                        Label("Re-Resolve Stream Link", systemImage: "arrow.triangle.2.circlepath")
+                        Label("Test & Resolve Stream Link", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .disabled(isWorking)
+
+                    Button {
+                        Task { await runMusicBrainzMatch() }
+                    } label: {
+                        Label("Auto-Tag Metadata & Cover (MusicBrainz)", systemImage: "wand.and.stars")
                     }
                     .disabled(isWorking)
 
                     Button {
                         Task {
-                            await offline.download(track: track)
-                            statusMessage = offline.isDownloaded(track.id)
+                            await offline.download(track: liveTrack)
+                            statusMessage = offline.isDownloaded(liveTrack.id)
                                 ? "Saved locally onto your iPhone!"
                                 : (offline.lastError ?? "Download failed.")
                         }
                     } label: {
                         Label(
-                            offline.isDownloaded(track.id) ? "Re-Download Offline Copy" : "Save Offline on iPhone",
+                            offline.isDownloaded(liveTrack.id) ? "Re-Download Offline Copy" : "Save Offline on iPhone",
                             systemImage: "arrow.down.circle"
                         )
                     }
                     .disabled(isWorking)
 
                     Button {
-                        Task { await toggleManualUnavailable() }
+                        let nextVal = !liveTrack.unavailableFlag
+                        library.setTrackAvailability(liveTrack.id, unavailable: nextVal)
+                        statusMessage = nextVal ? "Marked unavailable." : "Marked available."
                     } label: {
                         Label(
-                            track.unavailableFlag ? "Mark as Available" : "Mark as Unavailable",
-                            systemImage: track.unavailableFlag ? "checkmark.circle" : "exclamationmark.triangle"
+                            liveTrack.unavailableFlag ? "Mark as Available" : "Mark as Unavailable",
+                            systemImage: liveTrack.unavailableFlag ? "checkmark.circle" : "exclamationmark.triangle"
                         )
                     }
-                    .disabled(isWorking)
                 }
                 .listRowBackground(Theme.surface)
 
@@ -202,26 +213,30 @@ struct TrackInspectorSheet: View {
         }
     }
 
-    private func resolvePrimaryLink() async {
+    private func probePrimaryMirror() async {
+        guard let url = liveTrack.primaryUrl ?? liveTrack.links.first?.url else {
+            statusMessage = "No URL attached to test."
+            return
+        }
         isWorking = true
         defer { isWorking = false }
-        do {
-            let res = try await APIClient.shared.resolveTrack(trackId: track.id, force: true)
-            statusMessage = res.resolution.ok
-                ? "Resolved OK (\(res.resolution.mimeType ?? "audio"))"
-                : (res.resolution.errorMessage ?? "Could not resolve mirror.")
-            await library.refreshAll()
-        } catch {
-            statusMessage = error.localizedDescription
+        let res = await HostResolverService.shared.resolve(url: url)
+        if res.ok {
+            library.setTrackAvailability(liveTrack.id, unavailable: false)
+            statusMessage = "Resolved OK (\(res.mimeType ?? res.host))"
+        } else {
+            statusMessage = res.errorMessage ?? "Mirror resolution failed."
         }
     }
 
-    private func toggleManualUnavailable() async {
+    private func runMusicBrainzMatch() async {
         isWorking = true
         defer { isWorking = false }
-        _ = await APIClient.shared.setTrackAvailability(trackId: track.id, unavailable: !track.unavailableFlag)
-        await library.refreshAll()
-        statusMessage = !track.unavailableFlag ? "Marked unavailable." : "Marked available."
+        if let updated = await library.enrichTrackWithMusicBrainz(liveTrack.id) {
+            statusMessage = "Updated: \"\(updated.title)\" — \(updated.artist)"
+        } else {
+            statusMessage = "No exact MusicBrainz match found."
+        }
     }
 }
 
@@ -232,39 +247,83 @@ struct SyncAndImportSheet: View {
 
     @State private var mode = 0
     @State private var trackerInput = ""
+    @State private var directoryFilter = ""
     @State private var mediaUrlInput = ""
     @State private var spotifyName = "My Spotify Migration"
     @State private var spotifyContent = ""
     @State private var statusText: String?
     @State private var isBusy = false
 
+    private var filteredDirectory: [DirectoryArtist] {
+        let q = directoryFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let base = library.directoryArtists.filter { $0.isLinkWorking }
+        guard !q.isEmpty else { return Array(base.prefix(30)) }
+        return Array(base.filter { $0.name.lowercased().contains(q) }.prefix(30))
+    }
+
     var body: some View {
         NavigationStack {
             Form {
                 Picker("Import Type", selection: $mode) {
                     Text("ArtistGrid").tag(0)
-                    Text("Audio / Playlist URL").tag(1)
+                    Text("URL / Playlist").tag(1)
                     Text("Spotify CSV").tag(2)
                 }
                 .pickerStyle(.segmented)
                 .listRowBackground(Color.clear)
 
                 if mode == 0 {
-                    Section("ArtistGrid Tracker ID or Link") {
-                        TextField("e.g. 1CF... or artistgrid tracker ID", text: $trackerInput)
+                    Section("Sync by Tracker ID or Sheet URL") {
+                        TextField("Tracker ID or artistgrid.cx URL", text: $trackerInput)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
 
                         Button {
-                            Task { await syncTracker() }
+                            Task { await syncTracker(input: trackerInput) }
                         } label: {
                             if isBusy { ProgressView() } else { Text("Sync Artist Tracker") }
                         }
                         .disabled(trackerInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isBusy)
                     }
                     .listRowBackground(Theme.surface)
+
+                    Section("ArtistGrid Directory") {
+                        TextField("Search artists (e.g. Kanye, Carti, Frank Ocean...)", text: $directoryFilter)
+                            .autocorrectionDisabled()
+
+                        if library.directoryArtists.isEmpty {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                Text("Loading ArtistGrid directory...")
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.textSecondary)
+                            }
+                        } else {
+                            ForEach(filteredDirectory) { artist in
+                                Button {
+                                    Task { await syncTracker(input: artist.trackerId) }
+                                } label: {
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(artist.name)
+                                                .font(.subheadline.weight(.semibold))
+                                                .foregroundStyle(Theme.textPrimary)
+                                            Text(artist.isStarred ? "Featured Tracker" : "Community Tracker")
+                                                .font(.caption2)
+                                                .foregroundStyle(artist.isStarred ? Theme.accent : Theme.textSecondary)
+                                        }
+                                        Spacer()
+                                        Image(systemName: "arrow.down.circle")
+                                            .foregroundStyle(Theme.accent)
+                                    }
+                                }
+                                .disabled(isBusy)
+                            }
+                        }
+                    }
+                    .listRowBackground(Theme.surface)
                 } else if mode == 1 {
-                    Section("YouTube, YT Music, SoundCloud, Bandcamp") {
+                    Section("YouTube, YT Music, SoundCloud, Bandcamp, Direct") {
                         TextField("https://music.youtube.com/...", text: $mediaUrlInput)
                             .keyboardType(.URL)
                             .textInputAutocapitalization(.never)
@@ -287,7 +346,7 @@ struct SyncAndImportSheet: View {
                         Button {
                             Task { await importSpotify() }
                         } label: {
-                            if isBusy { ProgressView() } else { Text("Migrate to VaultStream") }
+                            if isBusy { ProgressView() } else { Text("Match on YT Music & Save") }
                         }
                         .disabled(spotifyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isBusy)
                     }
@@ -312,16 +371,19 @@ struct SyncAndImportSheet: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .task {
+                await library.loadDirectoryIfNeeded()
+            }
         }
     }
 
-    private func syncTracker() async {
+    private func syncTracker(input: String) async {
         isBusy = true
         defer { isBusy = false }
         do {
-            let res = try await APIClient.shared.syncTracker(input: trackerInput)
-            statusText = "Synced \(res.tracker.artistName) (\(res.tracksSynced) tracks)"
-            await library.refreshAll()
+            let res = try await library.syncArtistGridTracker(input: input)
+            statusText = "Synced \(res.artistName) (\(res.playableCount) playable tracks)"
+            library.showToast("Synced \(res.artistName)")
         } catch {
             statusText = error.localizedDescription
         }
@@ -331,15 +393,11 @@ struct SyncAndImportSheet: View {
         isBusy = true
         defer { isBusy = false }
         do {
-            let res = try await APIClient.shared.importUrl(url: mediaUrlInput)
-            if let tracks = res.tracks, !tracks.isEmpty {
-                player.play(track: tracks[0], queue: tracks)
-                statusText = "Imported \(tracks.count) tracks!"
-            } else if let track = res.track {
-                player.play(track: track)
-                statusText = "Imported \"\(track.title)\""
+            let res = try await library.importUrl(mediaUrlInput)
+            if let first = res.tracks.first {
+                player.play(track: first, queue: res.tracks)
+                statusText = res.playlist != nil ? "Imported \(res.tracks.count) tracks!" : "Imported \"\(first.title)\""
             }
-            await library.refreshAll()
         } catch {
             statusText = error.localizedDescription
         }
@@ -348,107 +406,38 @@ struct SyncAndImportSheet: View {
     private func importSpotify() async {
         isBusy = true
         defer { isBusy = false }
-        do {
-            let res = try await APIClient.shared.importSpotify(name: spotifyName, content: spotifyContent)
-            statusText = "Matched \(res.tracksAdded)/\(res.totalParsed) tracks (\(res.matchedLocal) local, \(res.matchedOnline) online)"
-            await library.refreshAll()
-        } catch {
-            statusText = error.localizedDescription
+        let res = await library.importSpotify(name: spotifyName, content: spotifyContent)
+        statusText = "Matched \(res.matched)/\(res.total) tracks into \"\(spotifyName)\""
+    }
+}
+
+struct YouTubeAuthSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            YouTubeLoginWebView()
+                .navigationTitle("YouTube Sign-In")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done") { dismiss() }
+                    }
+                }
         }
     }
 }
 
-struct ServerSetupSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var library: LibraryStore
-    @AppStorage(APIClient.serverURLKey) private var serverURL = ""
-    @State private var draftURL = ""
-    @State private var testing = false
-    @State private var feedback: String?
-    @State private var succeeded = false
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("Connect Your VaultStream PC", systemImage: "desktopcomputer")
-                            .font(.headline)
-                            .foregroundStyle(Theme.textPrimary)
-                        Text("Open VaultStream on your PC, click Settings, and copy the iPhone & LAN URL (for example `http://192.168.1.42:3456` on Wi-Fi or your Tailscale IP from anywhere).")
-                            .font(.caption)
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-                    .padding(.vertical, 4)
-                }
-                .listRowBackground(Theme.surface)
-
-                Section("Server Address") {
-                    TextField("http://192.168.1.42:3456", text: $draftURL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-
-                    Button {
-                        Task { await testAndConnect() }
-                    } label: {
-                        HStack {
-                            if testing { ProgressView() }
-                            Text(testing ? "Connecting..." : "Connect & Sync Library")
-                                .fontWeight(.semibold)
-                        }
-                    }
-                    .disabled(draftURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || testing)
-                }
-                .listRowBackground(Theme.surface)
-
-                if let feedback {
-                    Section("Connection Status") {
-                        Text(feedback)
-                            .font(.caption)
-                            .foregroundStyle(succeeded ? Theme.accent : Theme.danger)
-                    }
-                    .listRowBackground(Theme.surface)
-                }
-
-                Section {
-                    Button("Skip for Now (Offline Mode Only)") {
-                        dismiss()
-                    }
-                    .foregroundStyle(Theme.textSecondary)
-                }
-                .listRowBackground(Theme.surface)
-            }
-            .scrollContentBackground(.hidden)
-            .background(Theme.background)
-            .navigationTitle("VaultStream Setup")
-            .navigationBarTitleDisplayMode(.inline)
-            .onAppear {
-                draftURL = serverURL
-            }
+private struct YouTubeLoginWebView: UIViewRepresentable {
+    func makeUIView(context: Context) -> WKWebView {
+        let cfg = WKWebViewConfiguration()
+        cfg.websiteDataStore = .default()
+        let web = WKWebView(frame: .zero, configuration: cfg)
+        if let url = URL(string: "https://accounts.google.com/ServiceLogin?continue=https://www.youtube.com") {
+            web.load(URLRequest(url: url))
         }
+        return web
     }
 
-    private func testAndConnect() async {
-        testing = true
-        defer { testing = false }
-        let normalized = APIClient.normalizeServerURL(draftURL)
-        do {
-            let health = try await APIClient.shared.checkHealth(against: normalized)
-            if health.ok {
-                serverURL = normalized
-                APIClient.shared.rawServerURL = normalized
-                succeeded = true
-                feedback = "Connected to VaultStream PC!"
-                await library.refreshAll()
-                dismiss()
-            } else {
-                succeeded = false
-                feedback = "Server responded, but reported not ready."
-            }
-        } catch {
-            succeeded = false
-            feedback = error.localizedDescription
-        }
-    }
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
 }

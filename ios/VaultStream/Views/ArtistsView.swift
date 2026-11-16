@@ -24,10 +24,11 @@ struct ArtistsView: View {
                         Text("No Artists Synced Yet")
                             .font(.headline)
                             .foregroundStyle(Theme.textPrimary)
-                        Text("Tap + to sync any ArtistGrid tracker or import tracks.")
+                        Text("Browse the ArtistGrid directory or paste a tracker ID directly on your iPhone.")
                             .font(.caption)
                             .foregroundStyle(Theme.textSecondary)
-                        Button("Sync Artist Tracker") {
+                            .multilineTextAlignment(.center)
+                        Button("Browse ArtistGrid Directory") {
                             showSyncSheet = true
                         }
                         .buttonStyle(.borderedProminent)
@@ -59,7 +60,7 @@ struct ArtistsView: View {
                                         }
                                     }
 
-                                    Text("\(tracker.playableCount) playable • \(tracker.trackCount) total • \(tracker.syncedTabs.count) tab(s)")
+                                    Text("\(tracker.playableCount) playable • \(tracker.trackCount) total")
                                         .font(.caption)
                                         .foregroundStyle(Theme.textSecondary)
                                         .lineLimit(1)
@@ -70,10 +71,7 @@ struct ArtistsView: View {
                         .listRowBackground(Theme.surface)
                         .swipeActions(edge: .trailing) {
                             Button(role: .destructive) {
-                                Task {
-                                    try? await APIClient.shared.deleteTracker(id: tracker.trackerId)
-                                    await library.refreshAll()
-                                }
+                                library.deleteTracker(id: tracker.trackerId)
                             } label: {
                                 Label("Delete", systemImage: "trash")
                             }
@@ -88,9 +86,6 @@ struct ArtistsView: View {
             .searchable(text: $searchText, prompt: "Filter artists...")
             .navigationDestination(for: TrackerRecord.self) { tracker in
                 ArtistDetailView(tracker: tracker)
-            }
-            .refreshable {
-                await library.refreshAll()
             }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -121,12 +116,14 @@ struct ArtistDetailView: View {
     @State private var filterText: String = ""
     @State private var tracks: [TrackRecord] = []
     @State private var eras: [EraFacet] = []
-    @State private var isLoading = false
     @State private var isSyncingTab = false
-    @State private var isFollowed = false
+
+    private var liveTracker: TrackerRecord {
+        library.trackers.first(where: { $0.trackerId == tracker.trackerId }) ?? tracker
+    }
 
     private var availableTabs: [TrackerTabMeta] {
-        var list = tracker.tabs
+        var list = liveTracker.tabs
         if !list.contains(where: { $0.name.caseInsensitiveCompare("Unavailable") == .orderedSame }) {
             list.append(TrackerTabMeta(gid: nil, name: "Unavailable", slug: "unavailable"))
         }
@@ -139,14 +136,14 @@ struct ArtistDetailView: View {
                 // Artist Hero
                 HStack(spacing: 16) {
                     ArtworkImage(
-                        urlString: tracker.coverImage,
+                        urlString: liveTracker.coverImage,
                         cornerRadius: 16,
                         fallbackIcon: "music.mic"
                     )
                     .frame(width: 96, height: 96)
 
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(tracker.artistName)
+                        Text(liveTracker.artistName)
                             .font(.title2.weight(.bold))
                             .foregroundStyle(Theme.textPrimary)
 
@@ -181,13 +178,10 @@ struct ArtistDetailView: View {
                             .disabled(tracks.isEmpty)
 
                             Button {
-                                Task {
-                                    await library.toggleFollow(tracker: tracker)
-                                    isFollowed.toggle()
-                                }
+                                library.toggleFollow(trackerId: liveTracker.trackerId)
                             } label: {
-                                Image(systemName: isFollowed ? "heart.fill" : "heart")
-                                    .foregroundStyle(isFollowed ? Theme.accent : Theme.textSecondary)
+                                Image(systemName: (liveTracker.isFollowed ?? false) ? "heart.fill" : "heart")
+                                    .foregroundStyle((liveTracker.isFollowed ?? false) ? Theme.accent : Theme.textSecondary)
                             }
                         }
                     }
@@ -202,14 +196,14 @@ struct ArtistDetailView: View {
                             ChipButton(title: "All Tabs", isSelected: selectedTab.isEmpty) {
                                 selectedTab = ""
                                 selectedEra = ""
-                                Task { await loadTracks() }
+                                reloadTracks()
                             }
 
                             ForEach(availableTabs) { tab in
                                 ChipButton(title: tab.name, isSelected: selectedTab == tab.name) {
                                     selectedTab = tab.name
                                     selectedEra = ""
-                                    Task { await loadTracks() }
+                                    reloadTracks()
                                 }
                             }
                         }
@@ -223,12 +217,12 @@ struct ArtistDetailView: View {
                         HStack(spacing: 8) {
                             ChipButton(title: "All Eras", isSelected: selectedEra.isEmpty) {
                                 selectedEra = ""
-                                Task { await loadTracks() }
+                                reloadTracks()
                             }
                             ForEach(eras) { facet in
                                 ChipButton(title: "\(facet.era) (\(facet.count))", isSelected: selectedEra == facet.era) {
                                     selectedEra = facet.era
-                                    Task { await loadTracks() }
+                                    reloadTracks()
                                 }
                             }
                         }
@@ -236,20 +230,20 @@ struct ArtistDetailView: View {
                     }
                 }
 
-                if isLoading || isSyncingTab {
+                if isSyncingTab {
                     HStack {
                         Spacer()
-                        ProgressView(isSyncingTab ? "Syncing tab..." : "Loading tracks...")
+                        ProgressView("Syncing from ArtistGrid...")
                         Spacer()
                     }
                     .padding(.vertical, 32)
                 } else if tracks.isEmpty {
                     VStack(spacing: 10) {
-                        Text("No tracks indexed in this view yet.")
+                        Text("No tracks loaded in this tab yet.")
                             .font(.subheadline)
                             .foregroundStyle(Theme.textSecondary)
 
-                        if !selectedTab.isEmpty && selectedTab != "Unavailable" {
+                        if !selectedTab.isEmpty && selectedTab != "Unavailable" && liveTracker.trackerId != "imported_web" && liveTracker.trackerId != "spotify_imports" {
                             Button("Sync \"\(selectedTab)\" Tab Now") {
                                 Task { await syncSelectedTab() }
                             }
@@ -268,61 +262,55 @@ struct ArtistDetailView: View {
             .padding(.bottom, 20)
         }
         .background(Theme.background)
-        .navigationTitle(tracker.artistName)
+        .navigationTitle(liveTracker.artistName)
         .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $filterText, prompt: "Filter \(tracker.artistName) tracks...")
+        .searchable(text: $filterText, prompt: "Filter \(liveTracker.artistName) tracks...")
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    Task { await syncSelectedTab() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
+            if liveTracker.trackerId != "imported_web" && liveTracker.trackerId != "spotify_imports" {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        Task { await syncSelectedTab() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .disabled(isSyncingTab)
                 }
-                .disabled(isSyncingTab)
             }
         }
-        .task {
-            isFollowed = tracker.isFollowed ?? false
-            await loadTracks()
+        .onAppear {
+            reloadTracks()
         }
         .onChange(of: filterText) { _ in
-            Task { await loadTracks() }
+            reloadTracks()
         }
     }
 
-    private func loadTracks() async {
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            let res = try await APIClient.shared.searchTracks(
-                trackerId: tracker.trackerId,
-                tabName: selectedTab.isEmpty ? nil : selectedTab,
-                q: filterText.isEmpty ? nil : filterText,
-                era: selectedEra.isEmpty ? nil : selectedEra,
-                limit: 300
-            )
-            tracks = res.tracks
-            if let fetchedEras = res.eras, !fetchedEras.isEmpty {
-                eras = fetchedEras
-            }
-        } catch {
-            library.showToast(error.localizedDescription)
+    private func reloadTracks() {
+        let res = library.searchTracks(
+            trackerId: liveTracker.trackerId,
+            tabName: selectedTab.isEmpty ? nil : selectedTab,
+            query: filterText.isEmpty ? nil : filterText,
+            era: selectedEra.isEmpty ? nil : selectedEra
+        )
+        tracks = res.tracks
+        if !res.eras.isEmpty {
+            eras = res.eras
         }
     }
 
     private func syncSelectedTab() async {
         isSyncingTab = true
         defer { isSyncingTab = false }
-        let tabObj = tracker.tabs.first(where: { $0.name == selectedTab })
+        let tabObj = liveTracker.tabs.first(where: { $0.name == selectedTab })
         do {
-            let synced = try await APIClient.shared.syncTracker(
-                input: tracker.trackerId,
+            let synced = try await library.syncArtistGridTracker(
+                input: liveTracker.trackerId,
                 tabGid: tabObj?.gid,
+                tabSlug: tabObj?.slug,
                 tabName: tabObj?.name ?? (selectedTab.isEmpty ? nil : selectedTab)
             )
-            library.showToast("Synced \(synced.tracksSynced) tracks (\(synced.tabSynced))")
-            await loadTracks()
-            await library.refreshAll()
+            library.showToast("Synced \(synced.trackCount) tracks for \(synced.artistName)")
+            reloadTracks()
         } catch {
             library.showToast(error.localizedDescription)
         }

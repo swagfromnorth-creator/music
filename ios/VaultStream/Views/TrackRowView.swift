@@ -112,7 +112,7 @@ struct TrackRowView: View {
 
                 if showLikeButton {
                     Button {
-                        Task { await library.toggleLike(track: track) }
+                        library.toggleLike(track: track)
                     } label: {
                         Image(systemName: isLiked ? "heart.fill" : "heart")
                             .font(.system(size: 15))
@@ -170,7 +170,7 @@ struct TrackRowView: View {
             }
 
             Button {
-                Task { await library.toggleLike(track: track) }
+                library.toggleLike(track: track)
             } label: {
                 Label(isLiked ? "Unlike" : "Like Song", systemImage: isLiked ? "heart.slash" : "heart")
             }
