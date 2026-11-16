@@ -17,11 +17,14 @@ Lightweight local Node.js + TypeScript proof-of-concept validating:
 - **Node.js v24+** (uses built-in `node:sqlite` with FTS5 and native TypeScript type stripping)
 
 ## Run Locally
+Double-click **`start.bat`** (auto-pulls updates from GitHub and opens **http://127.0.0.1:3456**), or run manually:
 ```bash
 npm install
 npm start
 ```
 Then open **http://127.0.0.1:3456** in your browser.
+
+To manually pull the latest changes from GitHub anytime, double-click **`pull from github.bat`** or use **Settings & cache -> GitHub Updates** inside the app.
 
 ### Environment Variables (Optional)
 - `PORT` (default `3456`)

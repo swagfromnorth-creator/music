@@ -116,6 +116,10 @@ const el = {
   customCapMbInput: document.getElementById("customCapMbInput"),
   clearAllCacheBtn: document.getElementById("clearAllCacheBtn"),
   cacheEntriesList: document.getElementById("cacheEntriesList"),
+  updateStatusText: document.getElementById("updateStatusText"),
+  checkUpdateBtn: document.getElementById("checkUpdateBtn"),
+  applyUpdateBtn: document.getElementById("applyUpdateBtn"),
+  restartAppBtn: document.getElementById("restartAppBtn"),
   testResolveForm: document.getElementById("testResolveForm"),
   testResolveInput: document.getElementById("testResolveInput"),
   testResolveOutput: document.getElementById("testResolveOutput"),
@@ -938,11 +942,13 @@ el.navCacheBtn.addEventListener("click", async () => {
   el.cacheModal.classList.remove("hidden");
   await refreshCacheStats();
   if (state.cacheStats) renderCacheModal(state.cacheStats);
+  void refreshUpdateStatus(false);
 });
 el.headerCacheBtn.addEventListener("click", async () => {
   el.cacheModal.classList.remove("hidden");
   await refreshCacheStats();
   if (state.cacheStats) renderCacheModal(state.cacheStats);
+  void refreshUpdateStatus(false);
 });
 el.closeCacheBtn.addEventListener("click", () => el.cacheModal.classList.add("hidden"));
 el.cacheModal.addEventListener("click", (ev) => {
@@ -1306,9 +1312,66 @@ document.addEventListener("keydown", (ev) => {
   }
 });
 
+async function refreshUpdateStatus(notifyToast = false) {
+  try {
+    const status = await apiJson("/api/update/status");
+    if (!status.supported) {
+      el.updateStatusText.textContent = status.reason || "Updates unavailable";
+      el.applyUpdateBtn.classList.add("hidden");
+      return;
+    }
+    if (status.behindCount > 0) {
+      el.updateStatusText.textContent = `Update available: ${status.behindCount} new commit(s) (${status.localCommit} → ${status.remoteCommit})`;
+      el.applyUpdateBtn.classList.remove("hidden");
+      if (notifyToast) {
+        showToast(`GitHub update available (${status.behindCount} new commit${status.behindCount > 1 ? "s" : ""}) — open Settings & cache to pull.`, "info");
+      }
+    } else {
+      el.updateStatusText.textContent = `Up to date (${status.localCommit || "main"})`;
+      el.applyUpdateBtn.classList.add("hidden");
+    }
+  } catch {
+    el.updateStatusText.textContent = "Could not reach GitHub";
+  }
+}
+
+el.checkUpdateBtn.addEventListener("click", () => refreshUpdateStatus(false));
+
+el.applyUpdateBtn.addEventListener("click", async () => {
+  el.applyUpdateBtn.disabled = true;
+  el.applyUpdateBtn.textContent = "Pulling...";
+  try {
+    const res = await apiJson("/api/update/apply", { method: "POST", body: "{}" });
+    el.applyUpdateBtn.classList.add("hidden");
+    if (res.updated) {
+      el.updateStatusText.textContent = `Updated ${res.previousCommit} → ${res.currentCommit}. Restart server (or run start.bat) to load backend updates.`;
+      el.restartAppBtn.classList.remove("hidden");
+      showToast(`Pulled latest from GitHub (${res.previousCommit} → ${res.currentCommit}).`, "success");
+    } else {
+      el.updateStatusText.textContent = `Already up to date (${res.currentCommit}).`;
+    }
+  } catch (err) {
+    el.updateStatusText.textContent = `Update failed: ${err.message}`;
+  } finally {
+    el.applyUpdateBtn.disabled = false;
+    el.applyUpdateBtn.textContent = "Pull & Update";
+  }
+});
+
+el.restartAppBtn.addEventListener("click", async () => {
+  try {
+    await apiJson("/api/update/restart", { method: "POST", body: "{}" });
+    el.updateStatusText.textContent = "Restarting server...";
+    setTimeout(() => location.reload(), 1800);
+  } catch (err) {
+    showToast(`Restart failed: ${err.message}`, "error");
+  }
+});
+
 // Bootstrap
 (async function init() {
   el.audioEl.volume = Number(el.volumeSlider.value);
   await Promise.all([refreshTrackers(), refreshCacheStats()]);
   await loadHomeData();
+  void refreshUpdateStatus(true);
 })();

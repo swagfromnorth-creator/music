@@ -13,6 +13,7 @@ import { AppDatabase } from "./db.ts";
 import { ImageProxyCache } from "./images.ts";
 import { resolveHostUrl, type FetchLike } from "./resolver.ts";
 import { fetchArtTabCovers, fetchDirectoryArtists, fetchTrackerFromArtistGrid } from "./tracker.ts";
+import { applyGitUpdate, checkForUpdates } from "./updater.ts";
 import type { DirectoryArtist, HostResolution, SyncResult, TrackRecord } from "./types.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -421,6 +422,38 @@ export function createAppServer(options: {
       if (method === "DELETE" && deleteCacheMatch) {
         await cache.deleteCachedEntry(deleteCacheMatch[1]!);
         sendJson(res, 200, { cache: cache.getStats() });
+        return;
+      }
+
+      // GitHub auto-update endpoints (loopback only)
+      const isLoopback =
+        req.socket.remoteAddress === "127.0.0.1" ||
+        req.socket.remoteAddress === "::1" ||
+        req.socket.remoteAddress === "::ffff:127.0.0.1";
+
+      if (method === "GET" && pathname === "/api/update/status") {
+        const status = await checkForUpdates();
+        sendJson(res, 200, status);
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/update/apply") {
+        if (!isLoopback) {
+          sendJson(res, 403, { error: "Updates can only be triggered from localhost." });
+          return;
+        }
+        const result = await applyGitUpdate();
+        sendJson(res, 200, result);
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/update/restart") {
+        if (!isLoopback) {
+          sendJson(res, 403, { error: "Restart can only be triggered from localhost." });
+          return;
+        }
+        sendJson(res, 200, { restarting: true });
+        setTimeout(() => process.exit(42), 150);
         return;
       }
 
