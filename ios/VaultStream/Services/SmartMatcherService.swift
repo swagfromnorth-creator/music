@@ -410,10 +410,20 @@ final class SmartMatcherService {
         var signals: [String] = []
         var score = 0
 
+        let rawArtistLower = candArtist.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let isGenericArtist = rawArtistLower.isEmpty
+            || rawArtistLower == "unknown artist"
+            || rawArtistLower == "various artists"
+            || rawArtistLower == "youtube"
+            || rawArtistLower == "youtube music"
+            || rawArtistLower == "soundcloud"
+            || source == .youtube
+            || source == .soundcloud
+
         var cTitleRaw = candTitle
         var cArtistRaw = "\(candArtist) \(candExtra ?? "")"
         let dashParts = candTitle.components(separatedBy: " - ")
-        if dashParts.count >= 2 {
+        if isGenericArtist, dashParts.count >= 2 {
             let leftNorm = normalizeTokens(dashParts[0])
             let tArtNorm = normalizeTokens(targetArtist)
             if !tArtNorm.isEmpty && (leftNorm.contains(tArtNorm) || tArtNorm.contains(leftNorm)) {
@@ -457,7 +467,7 @@ final class SmartMatcherService {
         }
 
         let tArt = normalizeTokens(targetArtist)
-        let cArt = normalizeTokens("\(cArtistRaw) \(candTitle)")
+        let cArt = normalizeTokens(isGenericArtist ? "\(cArtistRaw) \(candTitle)" : cArtistRaw)
         if tArt.isEmpty || tArt == "unknown artist" {
             score += 8
         } else {
@@ -487,6 +497,8 @@ final class SmartMatcherService {
             } else if j >= 0.25 {
                 score += 8
                 signals.append("partial album")
+            } else if let rawAlb = candAlbumOrEra, normalizeTokens(rawAlb).count >= 3, normalizeTokens(rawAlb) != "imported" {
+                score -= 8
             }
         }
 

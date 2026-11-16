@@ -473,8 +473,13 @@ describe("media extraction, local scanner, MusicBrainz normalization & Spotify m
       { title: "Nights", artist: "Frank Ocean", album: "Blonde", durationSec: 307 },
       { title: "Nights (Slowed + Reverb) 1 Hour", artist: "Random Uploader", albumOrEra: null, durationSec: 900, source: "youtube" }
     );
+    const wrongArtistSameWords = scoreTrackCandidate(
+      { title: "Nights", artist: "Frank Ocean", album: "Blonde", durationSec: 307 },
+      { title: "✨ Frank Ocean - Nights", artist: "Kendrick Lamar", albumOrEra: "To Pimp A Butterfly [V2]", durationSec: null, source: "artistgrid" }
+    );
     assert.ok(realHit.score > 80);
     assert.ok(slowedHit.score < 50);
+    assert.ok(wrongArtistSameWords.score < 50);
 
     let trackerSyncCalls = 0;
     ctx = createAppServer({

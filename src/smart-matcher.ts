@@ -119,11 +119,22 @@ export function scoreTrackCandidate(
   const signals: string[] = [];
   let score = 0;
 
-  // YouTube/SoundCloud titles often have "Artist - Song", try splitting to avoid artist words diluting title score
+  // YouTube/SoundCloud/generic uploads often put "Artist - Song" inside title
+  const rawArtistLower = candidate.artist.trim().toLowerCase();
+  const isGenericArtist =
+    !rawArtistLower ||
+    rawArtistLower === "unknown artist" ||
+    rawArtistLower === "various artists" ||
+    rawArtistLower === "soundcloud" ||
+    rawArtistLower === "youtube" ||
+    rawArtistLower === "youtube music" ||
+    candidate.source === "youtube" ||
+    candidate.source === "soundcloud";
+
   let candTitleRaw = candidate.title;
   let candArtistCombined = `${candidate.artist} ${candidate.extraText ?? ""}`.trim();
   const dashSplit = candidate.title.split(/\s+[—–-]\s+/);
-  if (dashSplit.length >= 2 && dashSplit[0] && dashSplit[1]) {
+  if (isGenericArtist && dashSplit.length >= 2 && dashSplit[0] && dashSplit[1]) {
     const leftNorm = normalizeMatchTokens(dashSplit[0]);
     const targetArtistNorm = normalizeMatchTokens(target.artist);
     if (targetArtistNorm && leftNorm && (leftNorm.includes(targetArtistNorm) || targetArtistNorm.includes(leftNorm))) {
@@ -176,9 +187,11 @@ export function scoreTrackCandidate(
     }
   }
 
-  // Artist match (against artist, channel, title prefix, credits)
+  // Artist match (against artist/channel/credits, plus title only for generic/online uploads)
   const tArtistNorm = normalizeMatchTokens(target.artist);
-  const cArtistNorm = normalizeMatchTokens(`${candArtistCombined} ${candidate.title}`);
+  const cArtistNorm = normalizeMatchTokens(
+    isGenericArtist ? `${candArtistCombined} ${candidate.title}` : candArtistCombined
+  );
   if (!tArtistNorm || tArtistNorm === "unknown artist") {
     score += 8;
   } else {
@@ -213,6 +226,12 @@ export function scoreTrackCandidate(
     } else if (albumJaccard >= 0.25) {
       score += 8;
       signals.push("partial album");
+    } else if (
+      candidate.albumOrEra &&
+      normalizeMatchTokens(candidate.albumOrEra).length >= 3 &&
+      normalizeMatchTokens(candidate.albumOrEra) !== "imported"
+    ) {
+      score -= 8;
     }
   }
 
