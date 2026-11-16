@@ -265,9 +265,9 @@ export class AppDatabase {
       this.setSetting("max_cache_bytes", String(DEFAULT_MAX_CACHE_BYTES));
     }
 
-    if (this.getSetting("curation_version") !== "v2") {
+    if (this.getSetting("curation_version") !== "v3") {
       this.cleanupLibraryCuration();
-      this.setSetting("curation_version", "v2");
+      this.setSetting("curation_version", "v3");
     }
   }
 

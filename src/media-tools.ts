@@ -130,11 +130,12 @@ export async function resolveWithYtDlp(targetUrl: string, timeoutMs = 15000): Pr
   }
 
   const args = [
+    "--force-ipv4",
     "--dump-json",
     "--no-warnings",
     "--no-playlist",
     "-f",
-    "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio",
+    "bestaudio[ext=mp3]/bestaudio[ext=webm]/bestaudio[protocol*=m3u8]/bestaudio/18",
   ];
   const cookieBrowser = (process.env.YTDLP_COOKIES_BROWSER ?? "").trim();
   if (cookieBrowser) {
