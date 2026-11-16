@@ -4,3 +4,6 @@ cache/
 *.db-wal
 *.db-shm
 VaultStream.exe
+ios/build/
+ios/*.xcodeproj/
+*.ipa

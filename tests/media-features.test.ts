@@ -450,6 +450,12 @@ describe("media extraction, local scanner, MusicBrainz normalization & Spotify m
     assert.equal(db.setCookiesBrowser("chrome"), "chrome");
     assert.equal(db.getCookiesBrowser(), "chrome");
 
+    // LAN / iPhone access setting defaults true and toggles cleanly
+    assert.equal(db.getAllowLanAccess(), true);
+    assert.equal(db.setAllowLanAccess(false), false);
+    assert.equal(db.getAllowLanAccess(), false);
+    assert.equal(db.setAllowLanAccess(true), true);
+
     // Collection URL detection for YouTube Music albums, YouTube playlists, and SoundCloud sets
     assert.equal(isCollectionUrl("https://music.youtube.com/browse/MPREb_or9GipYFiAw"), true);
     assert.equal(isCollectionUrl("https://www.youtube.com/playlist?list=PL12345"), true);
@@ -458,5 +464,42 @@ describe("media extraction, local scanner, MusicBrainz normalization & Spotify m
     } finally {
       db.close();
     }
+  });
+
+  it("exposes /api/settings/network and accepts connections when bound on 0.0.0.0", async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vaultstream-lan-test-"));
+    ctx = createAppServer({
+      dbPath: path.join(tmpDir, "test.db"),
+      cacheDir: path.join(tmpDir, "cache"),
+      boundHost: "0.0.0.0",
+    });
+
+    await new Promise<void>((resolve) => ctx!.server.listen(0, "0.0.0.0", resolve));
+    const addr = ctx.server.address() as { port: number };
+    const base = `http://127.0.0.1:${addr.port}`;
+
+    const initialRes = await fetch(`${base}/api/settings/network`);
+    assert.equal(initialRes.status, 200);
+    const initialJson = (await initialRes.json()) as {
+      allowLanAccess: boolean;
+      boundHost: string;
+      lanUrls: string[];
+    };
+    assert.equal(initialJson.allowLanAccess, true);
+    assert.equal(initialJson.boundHost, "0.0.0.0");
+    assert.ok(Array.isArray(initialJson.lanUrls));
+
+    const toggleRes = await fetch(`${base}/api/settings/network`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ allowLanAccess: false }),
+    });
+    assert.equal(toggleRes.status, 200);
+    const toggled = (await toggleRes.json()) as {
+      allowLanAccess: boolean;
+      needsRestart: boolean;
+    };
+    assert.equal(toggled.allowLanAccess, false);
+    assert.equal(toggled.needsRestart, true);
   });
 });

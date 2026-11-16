@@ -1,0 +1,72 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "ios/**"
+      - ".github/workflows/build-ios.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-ipa:
+    name: Build VaultStream.ipa
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check Xcode toolchain
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: |
+          cd ios
+          xcodegen generate
+
+      - name: Archive unsigned Release build
+        run: |
+          xcodebuild \
+            -project ios/VaultStream.xcodeproj \
+            -scheme VaultStream \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -archivePath ios/build/VaultStream.xcarchive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            archive
+
+      - name: Package VaultStream.ipa
+        run: |
+          rm -rf ios/build/ipa
+          mkdir -p ios/build/ipa/Payload
+          cp -R ios/build/VaultStream.xcarchive/Products/Applications/VaultStream.app ios/build/ipa/Payload/
+          (cd ios/build/ipa && zip -r ../VaultStream.ipa Payload)
+          ls -lh ios/build/VaultStream.ipa
+
+      - name: Upload VaultStream.ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VaultStream-iOS-IPA
+          path: ios/build/VaultStream.ipa
+          retention-days: 90
+
+      - name: Publish rolling iOS Release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ios-latest
+          name: VaultStream iOS (Latest IPA)
+          prerelease: true
+          generate_release_notes: true
+          files: ios/build/VaultStream.ipa

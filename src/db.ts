@@ -317,6 +317,18 @@ export class AppDatabase {
     return safe;
   }
 
+  public getAllowLanAccess(): boolean {
+    const raw = this.getSetting("allow_lan_access");
+    if (raw === null) return true;
+    return raw !== "0" && raw.toLowerCase() !== "false";
+  }
+
+  public setAllowLanAccess(allow: boolean): boolean {
+    const next = Boolean(allow);
+    this.setSetting("allow_lan_access", next ? "1" : "0");
+    return next;
+  }
+
   public setTrackUnavailable(id: string, unavailable: boolean): void {
     this.db.prepare("UPDATE tracks SET is_unavailable = ? WHERE id = ?").run(unavailable ? 1 : 0, id);
   }
